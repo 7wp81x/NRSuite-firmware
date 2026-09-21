@@ -1,0 +1,16 @@
+# PlatformIO
+.pio/
+.cache/
+.vscode/
+compile_commands.json
+
+# Python helper artifacts
+__pycache__/
+*.py[cod]
+data/
+*.log
+
+# Firmware release artifacts published via GitHub Releases
+release/
+beta-release/
+*.bin
