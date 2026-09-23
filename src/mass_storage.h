@@ -6,6 +6,8 @@ public:
     // File operations — work on any chip, only need FFat, no USB hardware required
     static bool writeFile(const char* path, const String& content, bool append = false);
     static bool readFile(const char* path, String& out);
+    static bool readFileChunk(const char* path, size_t offset, size_t length,
+                              String& out, size_t& totalSize, bool& eof);
     static bool deleteFile(const char* path);
     static bool listFiles(String& out);              // newline-separated list, out = "name\tsize\n..."
     static bool getSpace(uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes);

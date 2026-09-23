@@ -106,11 +106,26 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 
 // Stop every radio/network subsystem before starting a new one.
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
-static void radioIdle() {
+static void stopRadioModules() {
     sniffer.stop();
     beacon.stop();
     portal.stop();
     esp_wifi_set_promiscuous(false);
+}
+
+static void stopAllModules() {
+    stopRadioModules();
+    #ifdef ENABLE_BLE_HID
+        BleHid::end();
+    #endif
+    #if MSC_SUPPORTED
+        FileUpload::reset();
+    #endif
+    vTaskDelay(pdMS_TO_TICKS(120));
+}
+
+static void radioIdle() {
+    stopRadioModules();
     vTaskDelay(pdMS_TO_TICKS(80));
 }
 
@@ -143,12 +158,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("beacon");
         features.add("portal");
         features.add("portal_html_offset");
+        features.add("html_diag");
+        features.add("stop_all");
         features.add("storage");
         #ifdef ENABLE_BLE_HID
             features.add("ble_hid");
         #endif
         #if MSC_SUPPORTED
             features.add("msc");
+            features.add("msc_read_chunk");
         #endif
         #if HID_SUPPORTED
             features.add("badusb");
@@ -168,6 +186,12 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── STOP_ALL ──────────────────────────────────────────────────────────
+    else if (strcmp(cmd, "STOP_ALL") == 0) {
+        stopAllModules();
+        proto.sendResp(id, true, "all modules stopped");
     }
 
     // ── START_SNIFF ──────────────────────────────────────────────────────
@@ -384,6 +408,14 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "RESET_HTML") == 0) {
         size_t expectedSize = doc["args"]["size"] | 0;
         bool ok = portal.resetHtml(expectedSize);
+
+        JsonDocument ev;
+        ev["type"]      = "html_reset";
+        ev["expected"]  = expectedSize;
+        ev["ok"]        = ok;
+        ev["free_heap"] = ESP.getFreeHeap();
+        proto.sendEvent("debug", ev);
+
         proto.sendResp(id, ok);
     }
 
@@ -396,6 +428,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         const size_t offset = hasOffset ? doc["args"]["offset"].as<size_t>() : 0;
 
         if (!b64data) {
+            JsonDocument ev;
+            ev["type"] = "html_chunk_rejected";
+            ev["reason"] = "missing_data";
+            ev["offset"] = offset;
+            proto.sendEvent("debug", ev);
             proto.sendResp(id, false, "missing data");
             return;
         }
@@ -406,6 +443,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         // Use heap, not stack
         uint8_t* outBuf = (uint8_t*)heap_caps_malloc(outCap, MALLOC_CAP_8BIT);
         if (!outBuf) {
+            JsonDocument ev;
+            ev["type"] = "html_chunk_rejected";
+            ev["reason"] = "oom";
+            ev["offset"] = offset;
+            proto.sendEvent("debug", ev);
             proto.sendResp(id, false, "oom");
             return;
         }
@@ -415,6 +457,18 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                                         (const unsigned char*)b64data, b64len);
         if (ret == 0) {
             const bool accepted = portal.setHtmlChunk(outBuf, outLen, last, offset, hasOffset);
+
+            JsonDocument ev;
+            ev["type"]          = accepted ? "html_chunk" : "html_chunk_rejected";
+            ev["offset"]        = offset;
+            ev["len"]           = outLen;
+            ev["last"]          = last;
+            ev["accepted"]      = accepted;
+            ev["html_size"]     = portal.getBufferSize();
+            ev["html_expected"] = portal.getExpectedSize();
+            ev["complete"]      = portal.isComplete();
+            proto.sendEvent("debug", ev);
+
             if (accepted) {
                 proto.sendResp(id, true);
             } else {
@@ -423,6 +477,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         } else {
             char msg[40];
             snprintf(msg, sizeof(msg), "b64 fail ret=%d", ret);
+
+            JsonDocument ev;
+            ev["type"]   = "html_chunk_rejected";
+            ev["reason"] = "decode_failed";
+            ev["ret"]    = ret;
+            ev["offset"] = offset;
+            ev["len"]    = b64len;
+            proto.sendEvent("debug", ev);
+
             proto.sendResp(id, false, "decode failed");
         }
 
@@ -441,6 +504,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
     #ifdef ENABLE_BLE_HID
     else if (strcmp(cmd, "BLE_START") == 0) {
+        radioIdle();
         const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
         BleHid::begin(String(name));
         proto.sendResp(id, true, "ble started");
@@ -636,17 +700,48 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             if (path[0] == '\0') {
                 proto.sendResp(id, false, "missing path");
             } else {
-                String content;
-                if (!MassStorage::readFile(path, content)) {
-                    proto.sendResp(id, false, "failed to read file");
+                const bool chunked = !doc["args"]["offset"].isNull() ||
+                                     !doc["args"]["length"].isNull() ||
+                                     !doc["args"]["limit"].isNull();
+                if (chunked) {
+                    size_t offset = doc["args"]["offset"] | 0;
+                    size_t limit  = doc["args"]["length"] | (doc["args"]["limit"] | 0);
+                    if (limit == 0) limit = 512;
+                    if (limit > 768) limit = 768;
+
+                    String content;
+                    size_t total = 0;
+                    bool eof = false;
+                    if (!MassStorage::readFileChunk(path, offset, limit, content, total, eof)) {
+                        proto.sendResp(id, false, "failed to read file chunk");
+                    } else {
+                        JsonDocument resp;
+                        resp["ok"]      = true;
+                        resp["path"]    = path;
+                        resp["content"] = content;
+                        resp["size"]    = content.length();
+                        resp["offset"]  = offset;
+                        resp["total"]   = total;
+                        resp["eof"]     = eof;
+                        String json; serializeJson(resp, json);
+                        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+                    }
                 } else {
-                    JsonDocument resp;
-                    resp["ok"]      = true;
-                    resp["path"]    = path;
-                    resp["content"] = content;
-                    resp["size"]    = content.length();
-                    String json; serializeJson(resp, json);
-                    proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+                    String content;
+                    if (!MassStorage::readFile(path, content)) {
+                        proto.sendResp(id, false, "failed to read file");
+                    } else {
+                        JsonDocument resp;
+                        resp["ok"]      = true;
+                        resp["path"]    = path;
+                        resp["content"] = content;
+                        resp["size"]    = content.length();
+                        resp["offset"]  = 0;
+                        resp["total"]   = content.length();
+                        resp["eof"]     = true;
+                        String json; serializeJson(resp, json);
+                        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+                    }
                 }
             }
         #else
