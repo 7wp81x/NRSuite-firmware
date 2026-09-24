@@ -399,7 +399,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
         bool ok = deauthDetector.start(cfg);
         if (!ok) {
-            proto.sendResp(id, false, "invalid channel (must be 1-13)");
+            proto.sendResp(id, false, "invalid channel (must be 1-14)");
         } else {
             JsonDocument resp;
             resp["ok"]      = true;

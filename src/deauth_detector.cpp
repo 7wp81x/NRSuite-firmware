@@ -19,7 +19,7 @@ bool DeauthDetector::start(const DeauthDetectConfig& config) {
         _hopIntervalMs = constrain(config.intervalMs, 50, 5000);
         _channel = 1;
     } else {
-        if (config.channel < 1 || config.channel > 13) return false;
+        if (config.channel < 1 || config.channel > 14) return false;
         _hopMode = false;
         _hopIntervalMs = 300;
         _channel = config.channel;
