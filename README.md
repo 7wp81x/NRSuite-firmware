@@ -31,6 +31,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or channel hopping, optional EAPOL-only filter |
 | Deauthentication | All | Raw 802.11 deauth frame injection, broadcast or targeted |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
+| Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
 | Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
 | BLE HID | C3, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
@@ -39,7 +40,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 
 ### Planned (see [FEATURES.md](./FEATURES.md))
-- Defense modules: deauth detector, rogue AP detector, AirTag/tracker detector
+- Defense modules: rogue AP detector, AirTag/tracker detector
 - ESP-NOW mesh: multi-node activation, distributed sensing, triangulation
 - Mesh chat
 - Remote camera support (ESP32-CAM node)

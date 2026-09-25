@@ -5,6 +5,7 @@
 #include "sniffer.h"
 #include "portal.h"
 #include "beacon.h"
+#include "deauth_detector.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -42,6 +43,7 @@ BridgeProtocol proto(Serial);
 Sniffer        sniffer;
 PortalManager  portal;
 BeaconSpammer  beacon;
+DeauthDetector deauthDetector;
 
 // ── IDF-level scan ───────────────────────────────────────────────────────────
 static volatile bool _scanDone = false;
@@ -108,6 +110,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void radioIdle() {
     sniffer.stop();
+    deauthDetector.stop();
     beacon.stop();
     portal.stop();
     esp_wifi_set_promiscuous(false);
@@ -140,6 +143,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("wifi");
         features.add("sniff");
         features.add("deauth");
+        features.add("deauth_detect");
         features.add("beacon");
         features.add("portal");
         features.add("portal_html_offset");
@@ -160,6 +164,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
         resp["portal"]   = portal.isRunning();
         resp["beacon"]   = beacon.active();
+        resp["deauth_detector"] = deauthDetector.active();
+        if (deauthDetector.active()) {
+            DeauthDetectStats ds = deauthDetector.stats();
+            resp["deauth_detector_channel"] = deauthDetector.channel();
+            resp["deauth_detector_hopping"] = deauthDetector.hopping();
+            resp["deauth_detected"] = ds.detected;
+            resp["deauth_detector_sent"] = ds.sent;
+            resp["deauth_detector_dropped"] = ds.dropped;
+        }
         if (beacon.active()) {
             BeaconStats bs = beacon.stats();
             resp["beacon_ssids"] = bs.ssids;
@@ -355,6 +368,72 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendEvent("deauth_stats", statsDoc);
 
         proto.sendResp(id, true, "deauth completed");
+    }
+
+    // ── DEAUTH DETECTOR ───────────────────────────────────────────────────
+    else if (strcmp(cmd, "DEAUTH_DETECT_START") == 0) {
+        radioIdle();
+
+        DeauthDetectConfig cfg;
+        const char* mode = doc["args"]["mode"] | "fixed";
+        cfg.hop = (strcmp(mode, "hop") == 0) || (doc["args"]["hop"] | false);
+        cfg.channel = doc["args"]["channel"] | 1;
+        cfg.intervalMs = doc["args"]["interval_ms"] | 300;
+
+        const char* bssidStr = doc["args"]["bssid"] | "";
+        uint8_t bssid[6];
+        if (parseMac(bssidStr, bssid)) {
+            cfg.hasBssid = true;
+            memcpy(cfg.bssid, bssid, 6);
+        }
+
+        const char* clientStr = doc["args"]["client"] | "";
+        uint8_t client[6];
+        if (parseMac(clientStr, client)) {
+            cfg.hasClient = true;
+            memcpy(cfg.client, client, 6);
+        }
+
+        int rssiMin = doc["args"]["rssi_min"] | -127;
+        cfg.rssiMin = (int8_t)constrain(rssiMin, -127, 0);
+
+        bool ok = deauthDetector.start(cfg);
+        if (!ok) {
+            proto.sendResp(id, false, "invalid channel (must be 1-14)");
+        } else {
+            JsonDocument resp;
+            resp["ok"]      = true;
+            resp["channel"] = deauthDetector.channel();
+            resp["hopping"] = deauthDetector.hopping();
+            String json; serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+        }
+    }
+
+    else if (strcmp(cmd, "DEAUTH_DETECT_STOP") == 0) {
+        DeauthDetectStats s = deauthDetector.stats();
+        deauthDetector.stop();
+        JsonDocument resp;
+        resp["ok"]       = true;
+        resp["detected"] = s.detected;
+        resp["sent"]     = s.sent;
+        resp["dropped"]  = s.dropped;
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "DEAUTH_DETECT_STATUS") == 0) {
+        DeauthDetectStats s = deauthDetector.stats();
+        JsonDocument resp;
+        resp["ok"]       = true;
+        resp["active"]   = deauthDetector.active();
+        resp["hopping"]  = deauthDetector.hopping();
+        resp["channel"]  = deauthDetector.channel();
+        resp["detected"] = s.detected;
+        resp["sent"]     = s.sent;
+        resp["dropped"]  = s.dropped;
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── CAPTIVE PORTAL ────────────────────────────────────────────────────
@@ -923,6 +1002,7 @@ void setup() {
     sniffer.begin(proto);
     portal.begin(proto);
     beacon.begin(proto);
+    deauthDetector.begin(proto);
 
 }
 
@@ -935,6 +1015,7 @@ void loop() {
     sniffer.handleHop();
     portal.update();
     beacon.update();
+    deauthDetector.update();
 
     static uint32_t lastRefresh = 0;
     if (millis() - lastRefresh > 2500) {
