@@ -30,6 +30,13 @@ namespace {
     constexpr const char* FAT_LABEL = "msc_ffat";
     bool mscStarted = false;
 
+    String normalizeStoragePath(const char* path) {
+        String normalized = path ? path : "";
+        if (normalized.length() && normalized[0] != '/') {
+            normalized = "/" + normalized;
+        }
+        return normalized;
+    }
 }
 
 // ── MSC mode (host sees a USB drive) ────────────────────────────────────
@@ -90,10 +97,7 @@ bool MassStorage::writeFile(const char* path, const String& content, bool append
 }
 
 bool MassStorage::readFile(const char* path, String& out) {
-    String normalizedPath = path;
-    if (normalizedPath.length() && normalizedPath[0] != '/') {
-        normalizedPath = "/" + normalizedPath;
-    }
+    String normalizedPath = normalizeStoragePath(path);
 
     if (!FFat.begin(false, "/ffat", 10, FAT_LABEL)) return false;
 
@@ -109,6 +113,50 @@ bool MassStorage::readFile(const char* path, String& out) {
     while (f.available()) {
         out += (char)f.read();
     }
+    f.close();
+    FFat.end();
+    return true;
+}
+
+bool MassStorage::readFileChunk(const char* path, size_t offset, size_t length,
+                                String& out, size_t& totalSize, bool& eof) {
+    out = "";
+    totalSize = 0;
+    eof = false;
+
+    String normalizedPath = normalizeStoragePath(path);
+    if (!FFat.begin(false, "/ffat", 10, FAT_LABEL)) return false;
+
+    File f = FFat.open(normalizedPath.c_str(), FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        FFat.end();
+        return false;
+    }
+
+    totalSize = f.size();
+    if (offset > totalSize) offset = totalSize;
+    if (!f.seek(offset)) {
+        f.close();
+        FFat.end();
+        return false;
+    }
+
+    const size_t remaining = totalSize - offset;
+    const size_t toRead = (length < remaining) ? length : remaining;
+    out.reserve(toRead);
+
+    uint8_t buf[128];
+    while (out.length() < toRead) {
+        size_t want = toRead - out.length();
+        if (want > sizeof(buf)) want = sizeof(buf);
+        size_t got = f.read(buf, want);
+        if (got == 0) break;
+        out.concat((const char*)buf, got);
+    }
+
+    eof = (offset + out.length()) >= totalSize;
+
     f.close();
     FFat.end();
     return true;
