@@ -115,6 +115,10 @@ void DeauthDetector::update() {
         _lastHopMs = millis();
         _channel = (_channel % 13) + 1;
         esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+
+        JsonDocument ev;
+        ev["channel"] = _channel;
+        _proto->sendEvent("deauth_detector_hop", ev);
     }
 
     Alert alert;
