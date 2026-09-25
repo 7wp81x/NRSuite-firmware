@@ -157,6 +157,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         JsonArray features = resp["features"].to<JsonArray>();
         features.add("wifi");
         features.add("sniff");
+        features.add("client_detect");
         features.add("deauth");
         features.add("deauth_detect");
         features.add("beacon");
@@ -177,6 +178,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             features.add("badusb");
         #endif
         resp["sniffing"] = sniffer.active();
+        resp["client_detecting"] = sniffer.active() && sniffer.clientOnly();
         resp["oversized_frames"] = proto.oversizedFrameCount();
         if (sniffer.active()) {
             resp["channel"] = sniffer.channel();
@@ -234,6 +236,35 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── STOP_SNIFF ────────────────────────────────────────────────────────
     else if (strcmp(cmd, "STOP_SNIFF") == 0) {
+        SniffStats s = sniffer.stats();
+        sniffer.stop();
+        JsonDocument resp;
+        resp["ok"]       = true;
+        resp["captured"] = s.captured;
+        resp["sent"]     = s.sent;
+        resp["dropped"]  = s.dropped;
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── CLIENT / PRESENCE DETECTOR ───────────────────────────────────────
+    else if (strcmp(cmd, "START_CLIENT_DETECT") == 0) {
+        radioIdle();
+
+        const char* mode = doc["args"]["mode"] | "fixed";
+        bool ok;
+        if (strcmp(mode, "hop") == 0) {
+            uint16_t interval = doc["args"]["interval_ms"] | 300;
+            ok = sniffer.startClientHop(interval);
+        } else {
+            uint8_t channel = doc["args"]["channel"] | 1;
+            ok = sniffer.startClientFixed(channel);
+        }
+
+        proto.sendResp(id, ok, ok ? "client detection started" : "invalid channel");
+    }
+
+    else if (strcmp(cmd, "STOP_CLIENT_DETECT") == 0) {
         SniffStats s = sniffer.stats();
         sniffer.stop();
         JsonDocument resp;

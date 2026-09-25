@@ -46,6 +46,7 @@ size_t Sniffer::buildRadiotap(uint8_t* out, uint8_t channel, int8_t rssi) {
 // ── startFixed / startHop / stop / setChannel ─────────────────────────────
 bool Sniffer::startFixed(uint8_t channel) {
     if (channel < 1 || channel > 13) return false;
+    _clientOnly = false;
 
     wifi_promiscuous_filter_t filter;
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
@@ -75,10 +76,23 @@ bool Sniffer::startHop(uint16_t intervalMs) {
     return true;
 }
 
+bool Sniffer::startClientFixed(uint8_t channel) {
+    if (!startFixed(channel)) return false;
+    _clientOnly = true;
+    return true;
+}
+
+bool Sniffer::startClientHop(uint16_t intervalMs) {
+    if (!startHop(intervalMs)) return false;
+    _clientOnly = true;
+    return true;
+}
+
 void Sniffer::stop() {
     esp_wifi_set_promiscuous(false);
     _active = false;
     _hopMode = false;
+    _clientOnly = false;
 }
 
 bool Sniffer::setChannel(uint8_t channel) {
@@ -158,8 +172,94 @@ bool Sniffer::isAssociationRequest(const wifi_promiscuous_pkt_t* pkt) const {
     return (ftype == 0) && (subtype == 0);  // Management + Assoc Request
 }
 
+static bool parseSsidIe(
+    const uint8_t* p,
+    size_t len,
+    size_t offset,
+    char* out,
+    size_t outSize
+) {
+    while (offset + 2 <= len) {
+        uint8_t id = p[offset];
+        uint8_t ieLen = p[offset + 1];
+        if (offset + 2 + ieLen > len) break;
+        if (id == 0) {
+            size_t copyLen = ieLen < (outSize - 1) ? ieLen : (outSize - 1);
+            memcpy(out, p + offset + 2, copyLen);
+            out[copyLen] = '\0';
+            return copyLen > 0;
+        }
+        offset += 2 + ieLen;
+    }
+    return false;
+}
+
+void Sniffer::emitClientEvent(wifi_promiscuous_pkt_t* pkt) {
+    if (!_proto || !pkt) return;
+
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 24) return;
+
+    const uint8_t* p = pkt->payload;
+    uint8_t fc0 = p[0];
+    if (((fc0 >> 2) & 0x3) != 0) return;  // management only
+
+    uint8_t subtype = (fc0 >> 4) & 0xF;
+    if (subtype != 0x00 && subtype != 0x02 &&
+        subtype != 0x04 && subtype != 0x0B) {
+        return;
+    }
+
+    const uint8_t* client = p + 10;  // addr2 / transmitter
+    const uint8_t* bssid  = p + 16;  // addr3 / BSSID
+
+    char clientStr[18];
+    char bssidStr[18];
+    char ssid[33] = {0};
+
+    snprintf(clientStr, sizeof(clientStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             client[0], client[1], client[2], client[3], client[4], client[5]);
+    snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+
+    bool broadcastBssid = true;
+    for (int i = 0; i < 6; i++) {
+        if (bssid[i] != 0xFF) {
+            broadcastBssid = false;
+            break;
+        }
+    }
+
+    if (subtype == 0x04) {
+        parseSsidIe(p, len, 24, ssid, sizeof(ssid));
+    } else if (subtype == 0x00) {
+        parseSsidIe(p, len, 28, ssid, sizeof(ssid));
+    } else if (subtype == 0x02) {
+        parseSsidIe(p, len, 34, ssid, sizeof(ssid));
+    }
+
+    JsonDocument ev;
+    ev["client"] = clientStr;
+    if (!broadcastBssid) ev["bssid"] = bssidStr;
+    if (ssid[0] != '\0') ev["ssid"] = ssid;
+    ev["subtype"] =
+        subtype == 0x04 ? "probe_request" :
+        subtype == 0x00 ? "association_request" :
+        subtype == 0x02 ? "reassociation_request" :
+                          "auth";
+    ev["rssi"] = pkt->rx_ctrl.rssi;
+    ev["channel"] = pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : _channel;
+
+    _proto->sendEvent("client_detected", ev);
+}
+
 void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
     if (!_active) return;
+
+    if (_clientOnly) {
+        emitClientEvent(pkt);
+        return;
+    }
 
     bool shouldCapture = false;
 

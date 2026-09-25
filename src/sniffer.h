@@ -30,6 +30,8 @@ public:
 
     bool startFixed(uint8_t channel);
     bool startHop(uint16_t intervalMs);
+    bool startClientFixed(uint8_t channel);
+    bool startClientHop(uint16_t intervalMs);
     void stop();
     bool setChannel(uint8_t channel);
 
@@ -42,6 +44,7 @@ public:
     bool       active()  const { return _active; }
     uint8_t    channel() const { return _channel; }
     bool       hopping() const { return _hopMode; }
+    bool       clientOnly() const { return _clientOnly; }
     SniffStats stats()   const { return _stats; }
 
 private:
@@ -50,6 +53,7 @@ private:
 
     bool     _active       = false;
     bool     _hopMode      = false;
+    bool     _clientOnly   = false;
     uint8_t  _channel      = 1;
     uint16_t _hopIntervalMs = 300;
     uint32_t _lastHopMs    = 0;
@@ -72,4 +76,5 @@ private:
     bool   isBeaconFrame(const wifi_promiscuous_pkt_t* pkt) const;
     bool   isAssociationRequest(const wifi_promiscuous_pkt_t* pkt) const;
     bool   matchesTargetBssid(const wifi_promiscuous_pkt_t* pkt) const;
+    void   emitClientEvent(wifi_promiscuous_pkt_t* pkt);
 };
