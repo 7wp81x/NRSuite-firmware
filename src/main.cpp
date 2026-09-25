@@ -164,6 +164,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("portal_html_offset");
         features.add("html_diag");
         features.add("stop_all");
+        features.add("wps");
         features.add("storage");
         #ifdef ENABLE_BLE_HID
             features.add("ble_hid");
@@ -285,6 +286,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                     ev["channel"]  = records[i].primary;
                     ev["rssi"]     = records[i].rssi;
                     ev["security"] = authModeStr(records[i].authmode);
+                    ev["wps"]      = (bool)records[i].wps;
                     proto.sendEvent("scan_ap", ev);
                 }
             }
