@@ -6,6 +6,7 @@
 #include "BridgeProtocol.h"
 
 #define DEAUTH_DETECT_QUEUE_DEPTH 24
+#define DEAUTH_SSID_CACHE_SIZE 16
 
 struct DeauthDetectConfig {
     bool     hop = false;
@@ -48,6 +49,14 @@ private:
         uint8_t  client[6];
         uint8_t  source[6];
         uint8_t  bssid[6];
+        char     ssid[33];
+    };
+
+    struct SsidCacheEntry {
+        bool     used;
+        uint8_t  bssid[6];
+        char     ssid[33];
+        uint32_t lastSeenMs;
     };
 
     BridgeProtocol* _proto = nullptr;
@@ -61,10 +70,14 @@ private:
 
     DeauthDetectConfig _config;
     DeauthDetectStats  _stats;
+    SsidCacheEntry     _ssidCache[DEAUTH_SSID_CACHE_SIZE] = {};
 
     static DeauthDetector* _instance;
     static void promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type);
     void handlePacket(wifi_promiscuous_pkt_t* pkt);
     bool matchesFilters(const uint8_t* dst, const uint8_t* src, const uint8_t* bssid) const;
+    void rememberBeaconSsid(wifi_promiscuous_pkt_t* pkt);
+    void updateSsidCache(const uint8_t* bssid, const char* ssid, size_t len);
+    const char* findSsid(const uint8_t* bssid) const;
     static void macToString(const uint8_t* mac, char* out);
 };

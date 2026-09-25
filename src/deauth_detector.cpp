@@ -8,6 +8,7 @@ void DeauthDetector::begin(BridgeProtocol& proto) {
     if (!_queue) {
         _queue = xQueueCreate(DEAUTH_DETECT_QUEUE_DEPTH, sizeof(Alert));
     }
+    memset(_ssidCache, 0, sizeof(_ssidCache));
     esp_wifi_set_promiscuous(false);
 }
 
@@ -27,6 +28,7 @@ bool DeauthDetector::start(const DeauthDetectConfig& config) {
 
     _config = config;
     _config.intervalMs = constrain(_config.intervalMs, 50, 5000);
+    memset(_ssidCache, 0, sizeof(_ssidCache));
     if (_queue) xQueueReset(_queue);
     _stats = DeauthDetectStats{};
     _lastHopMs = millis();
@@ -79,6 +81,10 @@ void DeauthDetector::handlePacket(wifi_promiscuous_pkt_t* pkt) {
     if (((fc0 >> 2) & 0x3) != 0) return;
 
     uint8_t subtype = (fc0 >> 4) & 0xF;
+    if (subtype == 0x08 || subtype == 0x05) {  // beacon / probe response
+        rememberBeaconSsid(pkt);
+        return;
+    }
     if (subtype != 0x0C && subtype != 0x0A) return;  // deauth / disassoc
 
     int8_t rssi = pkt->rx_ctrl.rssi;
@@ -101,6 +107,12 @@ void DeauthDetector::handlePacket(wifi_promiscuous_pkt_t* pkt) {
     memcpy(alert.client, dst, 6);
     memcpy(alert.source, src, 6);
     memcpy(alert.bssid, bssid, 6);
+    alert.ssid[0] = '\0';
+    const char* cached = findSsid(bssid);
+    if (cached) {
+        strncpy(alert.ssid, cached, sizeof(alert.ssid) - 1);
+        alert.ssid[sizeof(alert.ssid) - 1] = '\0';
+    }
 
     _stats.detected++;
     if (!_queue || xQueueSend(_queue, &alert, 0) != pdTRUE) {
@@ -141,10 +153,83 @@ void DeauthDetector::update() {
         ev["rssi"]         = alert.rssi;
         ev["reason"]       = alert.reason;
         ev["uptime_ms"]    = alert.uptimeMs;
+        if (alert.ssid[0] != '\0') {
+            ev["ssid"] = alert.ssid;
+        }
 
         _proto->sendEvent("deauth_detected", ev);
         _stats.sent++;
     }
+}
+
+void DeauthDetector::rememberBeaconSsid(wifi_promiscuous_pkt_t* pkt) {
+    uint16_t len = pkt->rx_ctrl.sig_len;
+    if (len < 38) return;
+
+    const uint8_t* p = pkt->payload;
+    const uint8_t* bssid = p + 16;
+    size_t offset = 24 + 12;  // mgmt header + beacon/probe-response fixed body
+
+    while (offset + 2 <= len) {
+        uint8_t id = p[offset];
+        uint8_t ieLen = p[offset + 1];
+        if (offset + 2 + ieLen > len) break;
+
+        if (id == 0) {  // SSID element
+            if (ieLen > 0 && ieLen <= 32) {
+                updateSsidCache(bssid, (const char*)(p + offset + 2), ieLen);
+            }
+            return;
+        }
+        offset += 2 + ieLen;
+    }
+}
+
+void DeauthDetector::updateSsidCache(const uint8_t* bssid, const char* ssid, size_t len) {
+    if (!bssid || !ssid || len == 0) return;
+    if (len > 32) len = 32;
+
+    int emptyIndex = -1;
+    int oldestIndex = 0;
+    uint32_t oldestMs = 0xFFFFFFFF;
+
+    for (int i = 0; i < DEAUTH_SSID_CACHE_SIZE; i++) {
+        SsidCacheEntry& entry = _ssidCache[i];
+        if (entry.used && memcmp(entry.bssid, bssid, 6) == 0) {
+            memcpy(entry.ssid, ssid, len);
+            entry.ssid[len] = '\0';
+            entry.lastSeenMs = millis();
+            return;
+        }
+        if (!entry.used && emptyIndex < 0) {
+            emptyIndex = i;
+        }
+        if (entry.used && entry.lastSeenMs < oldestMs) {
+            oldestMs = entry.lastSeenMs;
+            oldestIndex = i;
+        }
+    }
+
+    int index = emptyIndex >= 0 ? emptyIndex : oldestIndex;
+    SsidCacheEntry& entry = _ssidCache[index];
+    memcpy(entry.bssid, bssid, 6);
+    memcpy(entry.ssid, ssid, len);
+    entry.ssid[len] = '\0';
+    entry.lastSeenMs = millis();
+    entry.used = true;
+}
+
+const char* DeauthDetector::findSsid(const uint8_t* bssid) const {
+    if (!bssid) return nullptr;
+    for (int i = 0; i < DEAUTH_SSID_CACHE_SIZE; i++) {
+        const SsidCacheEntry& entry = _ssidCache[i];
+        if (entry.used &&
+            entry.ssid[0] != '\0' &&
+            memcmp(entry.bssid, bssid, 6) == 0) {
+            return entry.ssid;
+        }
+    }
+    return nullptr;
 }
 
 void DeauthDetector::macToString(const uint8_t* mac, char* out) {
