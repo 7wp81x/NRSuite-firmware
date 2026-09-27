@@ -265,8 +265,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
 
     else if (strcmp(cmd, "STOP_CLIENT_DETECT") == 0) {
-        SniffStats s = sniffer.stats();
         sniffer.stop();
+        SniffStats s = sniffer.stats();
         JsonDocument resp;
         resp["ok"]       = true;
         resp["captured"] = s.captured;
