@@ -39,6 +39,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
+| Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
 
 ### Planned (see [FEATURES.md](./FEATURES.md))
 - Defense modules: rogue AP detector, AirTag/tracker detector
