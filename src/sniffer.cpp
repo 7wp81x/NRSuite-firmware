@@ -25,6 +25,7 @@ void Sniffer::begin(BridgeProtocol& proto) {
     _proto = &proto;
     _instance = this;
     _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
+    _clientQueue = xQueueCreate(CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent));
 
     WiFi.disconnect();
     esp_wifi_set_promiscuous(false);
@@ -45,8 +46,24 @@ size_t Sniffer::buildRadiotap(uint8_t* out, uint8_t channel, int8_t rssi) {
 
 // ── startFixed / startHop / stop / setChannel ─────────────────────────────
 bool Sniffer::startFixed(uint8_t channel) {
+    return startFixedInternal(channel, false);
+}
+
+bool Sniffer::startHop(uint16_t intervalMs) {
+    return startHopInternal(intervalMs, false);
+}
+
+bool Sniffer::startClientFixed(uint8_t channel) {
+    return startFixedInternal(channel, true);
+}
+
+bool Sniffer::startClientHop(uint16_t intervalMs) {
+    return startHopInternal(intervalMs, true);
+}
+
+bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly) {
     if (channel < 1 || channel > 13) return false;
-    _clientOnly = false;
+    _clientOnly = clientOnly;
 
     wifi_promiscuous_filter_t filter;
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
@@ -60,6 +77,7 @@ bool Sniffer::startFixed(uint8_t channel) {
     _inFlight = 0;
     _chunkCtr = 0;
     if (_queue) xQueueReset(_queue);
+    if (_clientQueue) xQueueReset(_clientQueue);
 
     _channel = channel;
     _hopMode = false;
@@ -68,28 +86,18 @@ bool Sniffer::startFixed(uint8_t channel) {
     return true;
 }
 
-bool Sniffer::startHop(uint16_t intervalMs) {
-    if (!startFixed(1)) return false;
+bool Sniffer::startHopInternal(uint16_t intervalMs, bool clientOnly) {
+    if (!startFixedInternal(1, clientOnly)) return false;
     _hopMode = true;
     _hopIntervalMs = intervalMs;
     _lastHopMs = millis();
     return true;
 }
 
-bool Sniffer::startClientFixed(uint8_t channel) {
-    if (!startFixed(channel)) return false;
-    _clientOnly = true;
-    return true;
-}
-
-bool Sniffer::startClientHop(uint16_t intervalMs) {
-    if (!startHop(intervalMs)) return false;
-    _clientOnly = true;
-    return true;
-}
-
 void Sniffer::stop() {
     esp_wifi_set_promiscuous(false);
+    // Drain any client events that were queued between loop iterations.
+    processClientEvents();
     _active = false;
     _hopMode = false;
     _clientOnly = false;
@@ -194,70 +202,88 @@ static bool parseSsidIe(
     return false;
 }
 
-void Sniffer::emitClientEvent(wifi_promiscuous_pkt_t* pkt) {
-    if (!_proto || !pkt) return;
+bool Sniffer::enqueueClientEvent(wifi_promiscuous_pkt_t* pkt) {
+    if (!_clientQueue || !pkt) return false;
 
     uint16_t len = pkt->rx_ctrl.sig_len;
-    if (len < 24) return;
+    if (len < 24) return false;
 
     const uint8_t* p = pkt->payload;
     uint8_t fc0 = p[0];
-    if (((fc0 >> 2) & 0x3) != 0) return;  // management only
+    if (((fc0 >> 2) & 0x3) != 0) return false;  // management only
 
     uint8_t subtype = (fc0 >> 4) & 0xF;
     if (subtype != 0x00 && subtype != 0x02 &&
         subtype != 0x04 && subtype != 0x0B) {
-        return;
+        return false;
     }
 
-    const uint8_t* client = p + 10;  // addr2 / transmitter
-    const uint8_t* bssid  = p + 16;  // addr3 / BSSID
+    ClientEvent ev{};
+    memcpy(ev.client, p + 10, 6);  // addr2 / transmitter
+    memcpy(ev.bssid, p + 16, 6);   // addr3 / BSSID
+    ev.subtype = subtype;
+    ev.rssi = pkt->rx_ctrl.rssi;
+    ev.channel = pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : _channel;
 
-    char clientStr[18];
-    char bssidStr[18];
-    char ssid[33] = {0};
-
-    snprintf(clientStr, sizeof(clientStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             client[0], client[1], client[2], client[3], client[4], client[5]);
-    snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
-
-    bool broadcastBssid = true;
+    ev.hasBssid = true;
     for (int i = 0; i < 6; i++) {
-        if (bssid[i] != 0xFF) {
-            broadcastBssid = false;
-            break;
-        }
+        if (ev.bssid[i] != 0xFF) break;
+        if (i == 5) ev.hasBssid = false;
     }
 
     if (subtype == 0x04) {
-        parseSsidIe(p, len, 24, ssid, sizeof(ssid));
+        parseSsidIe(p, len, 24, ev.ssid, sizeof(ev.ssid));
     } else if (subtype == 0x00) {
-        parseSsidIe(p, len, 28, ssid, sizeof(ssid));
+        parseSsidIe(p, len, 28, ev.ssid, sizeof(ev.ssid));
     } else if (subtype == 0x02) {
-        parseSsidIe(p, len, 34, ssid, sizeof(ssid));
+        parseSsidIe(p, len, 34, ev.ssid, sizeof(ev.ssid));
     }
 
-    JsonDocument ev;
-    ev["client"] = clientStr;
-    if (!broadcastBssid) ev["bssid"] = bssidStr;
-    if (ssid[0] != '\0') ev["ssid"] = ssid;
-    ev["subtype"] =
-        subtype == 0x04 ? "probe_request" :
-        subtype == 0x00 ? "association_request" :
-        subtype == 0x02 ? "reassociation_request" :
-                          "auth";
-    ev["rssi"] = pkt->rx_ctrl.rssi;
-    ev["channel"] = pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : _channel;
+    if (xQueueSend(_clientQueue, &ev, 0) != pdTRUE) {
+        _stats.dropped++;
+        return false;
+    }
 
-    _proto->sendEvent("client_detected", ev);
+    _stats.captured++;
+    return true;
+}
+
+void Sniffer::processClientEvents() {
+    if (!_proto || !_clientQueue) return;
+
+    ClientEvent ev;
+    while (xQueueReceive(_clientQueue, &ev, 0) == pdTRUE) {
+        char clientStr[18];
+        char bssidStr[18];
+        snprintf(clientStr, sizeof(clientStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ev.client[0], ev.client[1], ev.client[2],
+                 ev.client[3], ev.client[4], ev.client[5]);
+        snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ev.bssid[0], ev.bssid[1], ev.bssid[2],
+                 ev.bssid[3], ev.bssid[4], ev.bssid[5]);
+
+        JsonDocument doc;
+        doc["client"] = clientStr;
+        if (ev.hasBssid) doc["bssid"] = bssidStr;
+        if (ev.ssid[0] != '\0') doc["ssid"] = ev.ssid;
+        doc["subtype"] =
+            ev.subtype == 0x04 ? "probe_request" :
+            ev.subtype == 0x00 ? "association_request" :
+            ev.subtype == 0x02 ? "reassociation_request" :
+                                 "auth";
+        doc["rssi"] = ev.rssi;
+        doc["channel"] = ev.channel;
+
+        _proto->sendEvent("client_detected", doc);
+        _stats.sent++;
+    }
 }
 
 void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
     if (!_active) return;
 
     if (_clientOnly) {
-        emitClientEvent(pkt);
+        enqueueClientEvent(pkt);
         return;
     }
 
@@ -317,6 +343,8 @@ void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
 // ── processQueue — call from loop() ──────────────────────────────────────
 void Sniffer::processQueue() {
     if (!_proto) return;
+
+    processClientEvents();
 
     CapturedFrame f;
     while (_inFlight < SNIFF_MAX_INFLIGHT && xQueueReceive(_queue, &f, 0) == pdTRUE) {

@@ -8,6 +8,7 @@
 #define SNIFF_SNAPLEN      400
 #define SNIFF_QUEUE_DEPTH  24
 #define SNIFF_MAX_INFLIGHT 4
+#define CLIENT_EVENT_QUEUE_DEPTH 24
 
 struct CapturedFrame {
     uint16_t cap_len;
@@ -15,6 +16,16 @@ struct CapturedFrame {
     uint8_t  channel;
     int8_t   rssi;
     uint8_t  data[SNIFF_SNAPLEN];
+};
+
+struct ClientEvent {
+    uint8_t  client[6];
+    uint8_t  bssid[6];
+    bool     hasBssid;
+    char     ssid[33];
+    uint8_t  subtype;
+    int8_t   rssi;
+    uint8_t  channel;
 };
 
 struct SniffStats {
@@ -50,6 +61,7 @@ public:
 private:
     BridgeProtocol* _proto = nullptr;
     QueueHandle_t   _queue = nullptr;
+    QueueHandle_t   _clientQueue = nullptr;
 
     bool     _active       = false;
     bool     _hopMode      = false;
@@ -76,5 +88,8 @@ private:
     bool   isBeaconFrame(const wifi_promiscuous_pkt_t* pkt) const;
     bool   isAssociationRequest(const wifi_promiscuous_pkt_t* pkt) const;
     bool   matchesTargetBssid(const wifi_promiscuous_pkt_t* pkt) const;
-    void   emitClientEvent(wifi_promiscuous_pkt_t* pkt);
+    bool   startFixedInternal(uint8_t channel, bool clientOnly);
+    bool   startHopInternal(uint16_t intervalMs, bool clientOnly);
+    void   processClientEvents();
+    bool   enqueueClientEvent(wifi_promiscuous_pkt_t* pkt);
 };
