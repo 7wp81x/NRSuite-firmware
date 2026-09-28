@@ -45,6 +45,27 @@ PortalManager  portal;
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 
+// ── Persistent device ID ─────────────────────────────────────────────────────
+static String getDeviceId() {
+    static String cached;
+    if (!cached.isEmpty()) return cached;
+
+    Preferences prefs;
+    if (prefs.begin("nrsuite", false)) {
+        cached = prefs.getString("device_id", "");
+        if (cached.isEmpty()) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "NR%08X", (unsigned)esp_random());
+            cached = buf;
+            prefs.putString("device_id", cached);
+        }
+        prefs.end();
+    }
+
+    if (cached.isEmpty()) cached = "NR00000000";
+    return cached;
+}
+
 // ── IDF-level scan ───────────────────────────────────────────────────────────
 static volatile bool _scanDone = false;
 static uint16_t g_lastHtmlSeq = 0xFFFF;
@@ -151,9 +172,10 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["ok"]       = true;
         resp["uptime"]   = millis();
         resp["heap"]     = ESP.getFreeHeap();
-        resp["chip"]     = CHIP_NAME;
-        resp["proto"]    = 1;
-        resp["fw"]       = FW_VERSION;
+        resp["chip"]      = CHIP_NAME;
+        resp["proto"]     = 1;
+        resp["fw"]        = FW_VERSION;
+        resp["device_id"] = getDeviceId();
         JsonArray features = resp["features"].to<JsonArray>();
         features.add("wifi");
         features.add("sniff");
