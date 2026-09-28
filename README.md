@@ -23,7 +23,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 ## Features
 
-### Current (v1.0.0-beta.1)
+### Current (in development)
 
 | Module | Supported Boards | Description |
 |---|---|---|
