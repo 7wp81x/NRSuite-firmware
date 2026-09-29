@@ -6,6 +6,7 @@
 #include "portal.h"
 #include "beacon.h"
 #include "deauth_detector.h"
+#include "hidden_ap.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -44,6 +45,7 @@ Sniffer        sniffer;
 PortalManager  portal;
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
+HiddenApDetector hiddenApDetector;
 
 // ── Persistent device ID ─────────────────────────────────────────────────────
 static String getDeviceId() {
@@ -132,6 +134,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 static void stopRadioModules() {
     sniffer.stop();
     deauthDetector.stop();
+    hiddenApDetector.stop();
     beacon.stop();
     portal.stop();
     esp_wifi_set_promiscuous(false);
@@ -188,6 +191,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("html_diag");
         features.add("stop_all");
         features.add("wps");
+        features.add("hidden_ap");
         features.add("storage");
         #ifdef ENABLE_BLE_HID
             features.add("ble_hid");
@@ -208,6 +212,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["portal"]   = portal.isRunning();
         resp["beacon"]   = beacon.active();
         resp["deauth_detector"] = deauthDetector.active();
+        resp["hidden_ap"] = hiddenApDetector.active();
         if (deauthDetector.active()) {
             DeauthDetectStats ds = deauthDetector.stats();
             resp["deauth_detector_channel"] = deauthDetector.channel();
@@ -215,6 +220,16 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             resp["deauth_detected"] = ds.detected;
             resp["deauth_detector_sent"] = ds.sent;
             resp["deauth_detector_dropped"] = ds.dropped;
+        }
+        if (hiddenApDetector.active()) {
+            HiddenApStats hs = hiddenApDetector.stats();
+            resp["hidden_ap_channel"] = hiddenApDetector.channel();
+            resp["hidden_ap_hopping"] = hiddenApDetector.hopping();
+            resp["hidden_ap_seen"] = hs.hiddenSeen;
+            resp["hidden_ap_candidates"] = hs.candidates;
+            resp["hidden_ap_resolved"] = hs.resolved;
+            resp["hidden_ap_sent"] = hs.sent;
+            resp["hidden_ap_dropped"] = hs.dropped;
         }
         if (beacon.active()) {
             BeaconStats bs = beacon.stats();
@@ -294,6 +309,34 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["captured"] = s.captured;
         resp["sent"]     = s.sent;
         resp["dropped"]  = s.dropped;
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── HIDDEN AP ENUMERATOR ─────────────────────────────────────────────
+    else if (strcmp(cmd, "START_HIDDEN_AP") == 0) {
+        radioIdle();
+
+        HiddenApConfig config;
+        const char* mode = doc["args"]["mode"] | "fixed";
+        config.hop = strcmp(mode, "hop") == 0;
+        config.channel = doc["args"]["channel"] | 1;
+        config.intervalMs = doc["args"]["interval_ms"] | 300;
+
+        bool ok = hiddenApDetector.start(config);
+        proto.sendResp(id, ok, ok ? "hidden AP detection started" : "invalid channel");
+    }
+
+    else if (strcmp(cmd, "STOP_HIDDEN_AP") == 0) {
+        HiddenApStats hs = hiddenApDetector.stats();
+        hiddenApDetector.stop();
+        JsonDocument resp;
+        resp["ok"]        = true;
+        resp["hidden"]    = hs.hiddenSeen;
+        resp["candidates"]= hs.candidates;
+        resp["resolved"]  = hs.resolved;
+        resp["sent"]      = hs.sent;
+        resp["dropped"]   = hs.dropped;
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
@@ -1153,6 +1196,7 @@ void setup() {
     portal.begin(proto);
     beacon.begin(proto);
     deauthDetector.begin(proto);
+    hiddenApDetector.begin(proto);
 
 }
 
@@ -1166,6 +1210,7 @@ void loop() {
     portal.update();
     beacon.update();
     deauthDetector.update();
+    hiddenApDetector.update();
 
     static uint32_t lastRefresh = 0;
     if (millis() - lastRefresh > 2500) {
