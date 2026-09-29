@@ -31,6 +31,15 @@ public:
     void stop();
     void update();
 
+    bool forceReconnect(
+        const uint8_t bssid[6],
+        const uint8_t client[6],
+        uint8_t channel,
+        uint16_t count,
+        uint16_t intervalMs,
+        uint8_t reason
+    );
+
     bool              active()  const { return _active; }
     bool              hopping() const { return _hopMode; }
     uint8_t           channel() const { return _channel; }

@@ -341,6 +341,29 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+    else if (strcmp(cmd, "HIDDEN_AP_FORCE_RECONNECT") == 0) {
+        const char* bssidStr  = doc["args"]["bssid"]  | "";
+        const char* clientStr = doc["args"]["client"] | "FF:FF:FF:FF:FF:FF";
+        uint8_t bssid[6] = {0};
+        uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+        if (!parseMac(bssidStr, bssid)) {
+            proto.sendResp(id, false, "invalid bssid");
+            return;
+        }
+        parseMac(clientStr, client);
+
+        uint8_t  channel   = doc["args"]["channel"] | 1;
+        uint16_t count     = doc["args"]["count"] | 5;
+        uint16_t interval  = doc["args"]["interval_ms"] | 60;
+        uint8_t  reason    = doc["args"]["reason"] | 7;
+
+        bool ok = hiddenApDetector.forceReconnect(
+            bssid, client, channel, count, interval, reason
+        );
+        proto.sendResp(id, ok, ok ? "reconnect burst sent" : "hidden AP detector not active or TX failed");
+    }
+
     // ── SET_CHANNEL ──────────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_CHANNEL") == 0) {
         uint8_t channel = doc["args"]["channel"] | 1;

