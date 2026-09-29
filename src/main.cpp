@@ -14,6 +14,7 @@
 
 #ifdef ENABLE_BLE_HID
 #include "ble_hid.h"
+#include "ble_scanner.h"
 #endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -46,6 +47,9 @@ PortalManager  portal;
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
+#ifdef ENABLE_BLE_HID
+BleScanner bleScanner;
+#endif
 
 // ── Persistent device ID ─────────────────────────────────────────────────────
 static String getDeviceId() {
@@ -143,6 +147,7 @@ static void stopRadioModules() {
 static void stopAllModules() {
     stopRadioModules();
     #ifdef ENABLE_BLE_HID
+        bleScanner.stop();
         BleHid::end();
     #endif
     #if MSC_SUPPORTED
@@ -153,6 +158,9 @@ static void stopAllModules() {
 
 static void radioIdle() {
     stopRadioModules();
+    #ifdef ENABLE_BLE_HID
+        bleScanner.stop();
+    #endif
     vTaskDelay(pdMS_TO_TICKS(80));
 }
 
@@ -195,6 +203,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("storage");
         #ifdef ENABLE_BLE_HID
             features.add("ble_hid");
+            features.add("ble_scan");
         #endif
         #if MSC_SUPPORTED
             features.add("msc");
@@ -213,6 +222,9 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["beacon"]   = beacon.active();
         resp["deauth_detector"] = deauthDetector.active();
         resp["hidden_ap"] = hiddenApDetector.active();
+        #ifdef ENABLE_BLE_HID
+            resp["ble_scanning"] = bleScanner.scanning();
+        #endif
         if (deauthDetector.active()) {
             DeauthDetectStats ds = deauthDetector.stats();
             resp["deauth_detector_channel"] = deauthDetector.channel();
@@ -703,11 +715,33 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
     #ifdef ENABLE_BLE_HID
+    else if (strcmp(cmd, "BLE_SCAN_START") == 0) {
+        if (BleHid::isAdvertising() || BleHid::isConnected()) {
+            proto.sendResp(id, false, "stop BLE HID before starting BLE scan");
+        } else {
+            bool active = doc["args"]["active"] | true;
+            uint16_t interval = doc["args"]["interval_ms"] | 100;
+            uint16_t window = doc["args"]["window_ms"] | 99;
+            uint32_t minEmit = doc["args"]["min_emit_ms"] | 1000;
+            bool ok = bleScanner.start(active, interval, window, minEmit);
+            proto.sendResp(id, ok, ok ? "ble scan started" : "failed to start ble scan");
+        }
+    }
+
+    else if (strcmp(cmd, "BLE_SCAN_STOP") == 0) {
+        bleScanner.stop();
+        proto.sendResp(id, true, "ble scan stopped");
+    }
+
     else if (strcmp(cmd, "BLE_START") == 0) {
-        radioIdle();
-        const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
-        BleHid::begin(String(name));
-        proto.sendResp(id, true, "ble started");
+        if (bleScanner.active()) {
+            proto.sendResp(id, false, "stop BLE scan before starting BLE HID");
+        } else {
+            radioIdle();
+            const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
+            BleHid::begin(String(name));
+            proto.sendResp(id, true, "ble started");
+        }
     }
 
     else if (strcmp(cmd, "BLE_STATUS") == 0) {
@@ -1220,6 +1254,9 @@ void setup() {
     beacon.begin(proto);
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
+    #ifdef ENABLE_BLE_HID
+        bleScanner.begin(proto);
+    #endif
 
 }
 
@@ -1234,6 +1271,9 @@ void loop() {
     beacon.update();
     deauthDetector.update();
     hiddenApDetector.update();
+    #ifdef ENABLE_BLE_HID
+        bleScanner.update();
+    #endif
 
     static uint32_t lastRefresh = 0;
     if (millis() - lastRefresh > 2500) {
