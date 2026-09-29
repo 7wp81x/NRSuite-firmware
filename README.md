@@ -33,6 +33,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client/Presence Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
+| Hidden AP Enumerator | All | Passive hidden AP detection, probe-request SSID candidates, and association-based SSID resolution |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
 | Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
 | BLE HID | C3, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
