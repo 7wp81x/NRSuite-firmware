@@ -38,13 +38,13 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
 | BLE HID | C3, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
 | BLE Scanner | C3, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
+| BLE GATT Profile | C3, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 | Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
 
-### Planned / in review (see [FEATURES.md](./FEATURES.md))
-- BLE GATT Profile: read-only service/characteristic enumeration (in review)
+### Planned (see [FEATURES.md](./FEATURES.md))
 - FastPair Model Identification: map FastPair model IDs to known device names/types
 - ESP-NOW mesh: multi-node activation, distributed sensing, triangulation
 - Mesh chat
