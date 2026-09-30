@@ -148,6 +148,12 @@ void BleScanner::onAdvertised(const NimBLEAdvertisedDevice* device) {
         memcpy(event.manufacturer, manufacturer.data(), event.manufacturerLength);
     }
 
+    const std::vector<uint8_t>& rawPayload = device->getPayload();
+    if (!rawPayload.empty() && rawPayload.size() <= sizeof(event.rawPayload)) {
+        event.rawPayloadLength = rawPayload.size();
+        memcpy(event.rawPayload, rawPayload.data(), event.rawPayloadLength);
+    }
+
     for (uint8_t i = 0; i < device->getServiceUUIDCount() && i < BLE_SCAN_MAX_SERVICES; i++) {
         String uuid = device->getServiceUUID(i).toString().c_str();
         uuid.toUpperCase();
@@ -182,6 +188,11 @@ void BleScanner::update() {
             char hex[65];
             macToHexString(event.manufacturer, event.manufacturerLength, hex, sizeof(hex));
             doc["manufacturer_data"] = hex;
+        }
+        if (event.rawPayloadLength > 0) {
+            char hex[129];
+            macToHexString(event.rawPayload, event.rawPayloadLength, hex, sizeof(hex));
+            doc["raw_payload"] = hex;
         }
         if (event.serviceCount > 0) {
             JsonArray services = doc["services"].to<JsonArray>();
