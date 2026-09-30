@@ -32,18 +32,20 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 | Deauthentication | All | Raw 802.11 deauth frame injection, broadcast or targeted |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
-| Client/Presence Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
-| Hidden AP Enumerator | All | Passive hidden AP detection, probe-request SSID candidates, and association-based SSID resolution |
+| Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
+| Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
 | Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
 | BLE HID | C3, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
+| BLE Scanner | C3, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 | Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
 
-### Planned (see [FEATURES.md](./FEATURES.md))
-- Defense modules: rogue AP detector, AirTag/tracker detector
+### Planned / in review (see [FEATURES.md](./FEATURES.md))
+- BLE GATT Profile: read-only service/characteristic enumeration (in review)
+- FastPair Model Identification: map FastPair model IDs to known device names/types
 - ESP-NOW mesh: multi-node activation, distributed sensing, triangulation
 - Mesh chat
 - Remote camera support (ESP32-CAM node)
@@ -110,6 +112,8 @@ pio run -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
 ### Option A: Flash from the NRSuite Android app (recommended)
 
 The Android app has a built-in ESP32 flasher. Connect your board via USB-OTG and use the flasher screen to upload the latest firmware binary from the [Releases](../../releases) page.
+
+> NRSuite uses **full-image USB reflashing only**. OTA updates are not planned for 4 MB builds.
 
 ### Option B: Flash via PlatformIO
 

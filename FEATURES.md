@@ -19,7 +19,10 @@ This document lists all current and planned features across the NRSuite ecosyste
 | Captive Portal | ✅ | Credential harvesting UI |
 | Packet Sniffer | ✅ | Monitor-mode capture, pcap export |
 | WPA Handshake Capture/Crack | ✅ | Offline dictionary cracking |
-| BLE Scan/Interaction | ✅ | Bluetooth LE device interaction |
+| BLE HID | ✅ | Bluetooth LE keyboard/mouse HID and DuckyScript payloads |
+| BLE Scanner | ✅ | Advertisement scan with names, RSSI, manufacturer data, service UUIDs, and raw payload |
+| BLE GATT Profile | 📋 | Read-only service/characteristic enumeration; in review |
+| FastPair Model ID | 📋 | Map FastPair model IDs to known device names/types |
 | BadUSB | ✅ | HID injection via USB |
 | Credential Manager | ✅ | Local storage of harvested creds |
 
@@ -27,12 +30,12 @@ This document lists all current and planned features across the NRSuite ecosyste
 
 | Feature | Status | Notes |
 |---|---|---|
-| Rogue AP Detector | 📋 | Baseline SSID→BSSID/channel/security; flags mismatches, downgrades, duplicate SSIDs, KARMA-style probe-response behavior |
+| Rogue AP Detector | ✅ | Baseline SSID→BSSID/channel/security; flags mismatches, downgrades, duplicate SSIDs, KARMA-style probe-response behavior |
 | Deauth Detector | ✅ | Passive deauth/disassoc monitoring with BSSID/client/RSSI/reason filters, async alerts, and live logs |
 | Deauth Locator | 📋 | RSSI-based direction/distance estimate; multi-node triangulation |
-| AirTag/Tracker Detector | 📋 | BLE "Find My"-style advert detection; cross-location persistence heuristic |
-| Client/Presence Detector | ✅ | Passive probe/assoc/reassoc/auth monitoring plus active deauth-trigger mode |
-| Hidden AP Enumerator | ✅ | Passive hidden AP detection, probe-request SSID candidates, and association-based SSID resolution |
+| Tracker Detector | ✅ | Android-side Find My-style detection using BLE Scanner raw payloads, repeated sightings, and alerts |
+| Client Detector | ✅ | Passive probe/assoc/reassoc/auth monitoring plus active deauth-trigger mode |
+| Hidden AP Revealer | ✅ | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Unauthorized RFID Reader Detector | 📋 | Detect unattended/skimmer-style RF field polling nearby |
 | Jam Detector (Sub-GHz / 2.4GHz) | 📋 | Wideband noise-floor anomaly detection (detection only — see Legal notes) |
 
