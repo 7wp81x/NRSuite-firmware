@@ -37,6 +37,8 @@ private:
         uint16_t appearance;
         uint8_t  manufacturer[32];
         uint8_t  manufacturerLength;
+        uint8_t  rawPayload[64];
+        uint8_t  rawPayloadLength;
         uint8_t  serviceCount;
         char     services[BLE_SCAN_MAX_SERVICES][37];
         uint32_t uptimeMs;
