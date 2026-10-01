@@ -10,7 +10,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.1"
+#define FW_VERSION "1.0.0-beta.2"
 
 #ifdef ENABLE_BLE_HID
 #include "ble_hid.h"

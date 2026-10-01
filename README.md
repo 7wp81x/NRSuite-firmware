@@ -128,7 +128,7 @@ Replace `esp32-c3` with your target environment.
 Download the merged binary from [Releases](../../releases) and flash it:
 
 ```bash
-esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 nrsuite-firmware-esp32c3-v1.0.0-beta.1.bin
+esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 beta-nrsuite-esp32c3.bin
 ```
 
 > The release binary is a merged flash image (bootloader + partition table + app) produced by `merge_script.py` at build time. Use offset `0x0` when flashing the merged binary.
@@ -151,14 +151,18 @@ This runs the protocol spec tests under `test/test_protocol_spec/`.
 
 ```
 src/
-  main.cpp          # Entry point, command handler, setup/loop
-  sniffer.cpp/h     # Monitor-mode packet capture and pcap streaming
-  beacon.cpp/h      # Beacon frame injection
-  portal.cpp/h      # Captive portal (SoftAP + async HTTP server)
-  ble_hid.cpp/h     # BLE keyboard/mouse HID (C3, S3, DevKit)
-  UsbHID.cpp/h      # USB HID BadUSB via TinyUSB (S2, S3)
-  mass_storage.cpp/h  # USB MSC + FAT filesystem (S2, S3)
-  FileUpload.cpp/h  # Chunked file upload to mass storage
+  main.cpp             # Entry point, command handler, setup/loop
+  sniffer.cpp/h        # Monitor-mode capture, client detection, pcap streaming
+  beacon.cpp/h         # Beacon frame injection
+  portal.cpp/h         # Captive portal (SoftAP + async HTTP server)
+  deauth_detector.cpp/h # Passive deauth/disassoc detector
+  hidden_ap.cpp/h      # Hidden AP detection and SSID resolution
+  ble_hid.cpp/h        # BLE keyboard/mouse HID (C3, S3, DevKit)
+  ble_scanner.cpp/h    # BLE advertisement scanner (C3, S3, DevKit)
+  ble_profile.cpp/h    # Read-only BLE GATT profiler (C3, S3, DevKit)
+  UsbHID.cpp/h         # USB HID BadUSB via TinyUSB (S2, S3)
+  mass_storage.cpp/h   # USB MSC + FAT filesystem (S2, S3)
+  FileUpload.cpp/h     # Chunked file upload to mass storage
   override_sanity.cpp  # ieee80211 raw frame sanity check override (required for frame injection)
 
 lib/
@@ -230,7 +234,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.1 | v1.0.0-beta.1 | v1.0 |
+| v1.0.0-beta.2 | v1.0.0-beta.2 | v1.0 |
 
 ---
 
