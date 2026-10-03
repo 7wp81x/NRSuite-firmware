@@ -55,6 +55,7 @@ private:
     static const uint8_t  PKT_HEARTBEAT = 1;
     static const uint8_t  PKT_JOIN      = 2;
     static const uint8_t  PKT_LEAVE     = 3;
+    static const uint8_t  PKT_CHANNEL_SWITCH = 4;
 
     static const size_t   HEADER_LEN    = 20;  // version,type,rsvd,session,counter,nodeHash,bootId
     static const size_t   TAG_LEN       = 16;  // AES-CCM tag
@@ -72,6 +73,9 @@ private:
     static const uint32_t PEER_TIMEOUT_MS      = 8000;
     static const uint32_t AUTH_WINDOW_MS       = 30000;
     static const uint32_t MIN_FREE_HEAP_BYTES  = 40000;
+    static const uint32_t MESH_SCAN_DWELL_MS   = 500;
+    static const uint32_t CHANNEL_SWITCH_DELAY_MS = 3000;
+    static const uint16_t CHANNEL_SWITCH_REPEAT_MS = 500;
 
     BridgeProtocol* _proto = nullptr;
     static MeshManager* _instance;
@@ -101,10 +105,24 @@ private:
     uint32_t _masterBootId = 0;
     uint32_t _lastPeerSweepMs = 0;
 
+    uint8_t  _channel = 1;
+    uint8_t  _scanChannel = 1;
+    uint8_t  _pendingChannel = 0;
+    uint32_t _lastScanHopMs = 0;
+    uint32_t _switchAtMs = 0;
+    uint32_t _lastSwitchPacketMs = 0;
+
     PeerEntry _peers[REPLAY_SLOTS] = {};
 
     bool loadKeys();
     bool storeKeys();
+    bool loadChannel();
+    bool storeChannel();
+    bool setChannel(uint8_t channel, bool persist);
+    uint8_t nextRecoveryChannel();
+    void startChannelSwitch(uint8_t targetChannel);
+    void sendChannelSwitch();
+    void handleChannelSwitch(uint32_t encodedTarget);
     bool clearKeys();
     bool startRadio();
     void stopRadio();
