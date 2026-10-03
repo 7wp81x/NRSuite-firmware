@@ -16,7 +16,7 @@ MeshManager* MeshManager::_instance = nullptr;
 
 // ── Public lifecycle ─────────────────────────────────────────────────────────
 
-void MeshManager::begin(BridgeProtocol& proto, const char* nodeId) {
+void MeshManager::begin(BridgeProtocol& proto, const char* nodeId, const char* chipName) {
     _proto = &proto;
     _instance = this;
 
@@ -24,6 +24,11 @@ void MeshManager::begin(BridgeProtocol& proto, const char* nodeId) {
     strncpy(_nodeId, effectiveNodeId, sizeof(_nodeId) - 1);
     _nodeId[sizeof(_nodeId) - 1] = '\0';
     _nodeHash = hashNodeId(_nodeId);
+
+    if (chipName && chipName[0]) {
+        strncpy(_chipName, chipName, sizeof(_chipName) - 1);
+        _chipName[sizeof(_chipName) - 1] = '\0';
+    }
 
     uint32_t boot = esp_random();
     _bootId = boot ? boot : 1;
@@ -472,7 +477,8 @@ void MeshManager::sendHeartbeat() {
     uint8_t packet[MAX_PACKET_LEN];
     size_t packetLen = 0;
     if (!encryptPacket(PKT_HEARTBEAT, ROLE_MASTER, _sessionId, _counter,
-                       millis(), _seq, _electionTs, nullptr, 0,
+                       millis(), _seq, _electionTs,
+                       (const uint8_t*)_chipName, strlen(_chipName),
                        packet, sizeof(packet), &packetLen)) {
         sendError("encrypt", "heartbeat encode failed");
         return;
@@ -493,6 +499,7 @@ void MeshManager::sendHeartbeat() {
     self.sessionId = _sessionId;
     self.lastSeenMs = millis();
     strncpy(self.nodeId, _nodeId, sizeof(self.nodeId) - 1);
+    strncpy(self.chip, _chipName, sizeof(self.chip) - 1);
     self.role = ROLE_MASTER;
     sendHeartbeatEvent(self, 0, millis(), _seq);
 }
@@ -507,7 +514,8 @@ void MeshManager::sendJoin() {
     uint8_t packet[MAX_PACKET_LEN];
     size_t packetLen = 0;
     if (!encryptPacket(PKT_JOIN, ROLE_CLIENT, _sessionId, _counter,
-                       millis(), _seq, 0, nullptr, 0,
+                       millis(), _seq, 0,
+                       (const uint8_t*)_chipName, strlen(_chipName),
                        packet, sizeof(packet), &packetLen)) {
         sendError("encrypt", "join encode failed");
         return;
@@ -538,9 +546,10 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
     uint32_t seq = 0;
     uint32_t electionTs = 0;
     char nodeId[11] = {0};
+    char chip[16] = {0};
     if (!decodePacket(data, len, &type, &sessionId, &counter, &nodeHash,
                       &bootId, &role, &uptimeMs, &seq, &electionTs,
-                      nodeId)) {
+                      nodeId, chip)) {
         return;
     }
 
@@ -551,7 +560,7 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
 
         bool firstSeen = false;
         if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
-                                  role, rssi, &firstSeen)) {
+                                  chip, role, rssi, &firstSeen)) {
             return;
         }
 
@@ -584,7 +593,7 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
 
         bool firstSeen = false;
         if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
-                                  role, rssi, &firstSeen)) {
+                                  chip, role, rssi, &firstSeen)) {
             return;
         }
 
@@ -613,7 +622,8 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
                                uint32_t* sessionId, uint32_t* counter,
                                uint32_t* nodeHash, uint32_t* bootId,
                                uint8_t* role, uint32_t* uptimeMs, uint32_t* seq,
-                               uint32_t* electionTs, char nodeIdOut[11]) {
+                               uint32_t* electionTs, char nodeIdOut[11],
+                               char chipOut[16]) {
     if (data[0] != MESH_PROTOCOL_VERSION) return false;
 
     const uint8_t ptype = data[1];
@@ -674,6 +684,13 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     memcpy(tempNodeId, plain + 32, 10);
     tempNodeId[10] = '\0';
 
+    char tempChip[16] = {0};
+    if (payloadLen > 0) {
+        const size_t chipLen = min((size_t)payloadLen, MAX_CHIP_LEN);
+        memcpy(tempChip, plain + BODY_HEADER_LEN, chipLen);
+        tempChip[chipLen] = '\0';
+    }
+
     *type = ptype;
     *sessionId = psession;
     *counter = pcounter;
@@ -684,6 +701,7 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     *seq = readU32(plain + 24);
     *electionTs = readU32(plain + 28);
     memcpy(nodeIdOut, tempNodeId, 11);
+    memcpy(chipOut, tempChip, 16);
     return true;
 }
 
@@ -776,6 +794,7 @@ MeshManager::PeerEntry* MeshManager::allocPeer() {
 bool MeshManager::authenticateAndTrack(uint32_t nodeHash, uint32_t bootId,
                                        uint32_t sessionId, uint32_t counter,
                                        const char nodeId[11],
+                                       const char chip[16],
                                        uint8_t role, int8_t rssi,
                                        bool* firstSeen) {
     PeerEntry* entry = findPeer(nodeHash);
@@ -804,6 +823,10 @@ bool MeshManager::authenticateAndTrack(uint32_t nodeHash, uint32_t bootId,
     entry->lastRssi = rssi;
     strncpy(entry->nodeId, nodeId, sizeof(entry->nodeId) - 1);
     entry->nodeId[sizeof(entry->nodeId) - 1] = '\0';
+    if (chip && chip[0]) {
+        strncpy(entry->chip, chip, sizeof(entry->chip) - 1);
+        entry->chip[sizeof(entry->chip) - 1] = '\0';
+    }
 
     if (firstSeen) *firstSeen = newPeer || rebooted || wasOffline;
     return true;
@@ -863,6 +886,7 @@ void MeshManager::sendHeartbeatEvent(const PeerEntry& peer, int8_t rssi,
 
     JsonDocument doc;
     doc["node_id"] = peer.nodeId;
+    if (peer.chip[0]) doc["chip"] = peer.chip;
     doc["role"] = peerRole;
     doc["session_id"] = peer.sessionId;
     doc["uptime_ms"] = uptimeMs;
@@ -875,6 +899,7 @@ void MeshManager::sendNodeJoinedEvent(const PeerEntry& peer, int8_t rssi) {
     if (!_proto) return;
     JsonDocument doc;
     doc["node_id"] = peer.nodeId;
+    if (peer.chip[0]) doc["chip"] = peer.chip;
     doc["session_id"] = _sessionId;
     doc["rssi"] = rssi;
     _proto->sendEvent("mesh_node_joined", doc);
@@ -908,6 +933,7 @@ void MeshManager::appendStatusJson(JsonDocument& doc) const {
 
         JsonObject item = peers.add<JsonObject>();
         item["node_id"] = peer.nodeId;
+        if (peer.chip[0]) item["chip"] = peer.chip;
         item["role"] = (peer.role == ROLE_MASTER) ? "master" : "client";
         if (peer.sessionId != 0) item["session_id"] = peer.sessionId;
         const uint32_t timeoutMs = (peer.role == ROLE_MASTER)

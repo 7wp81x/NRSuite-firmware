@@ -18,7 +18,7 @@
 // auth_key and transport_key with HKDF-SHA256 and provisions only those keys.
 class MeshManager {
 public:
-    void begin(BridgeProtocol& proto, const char* nodeId);
+    void begin(BridgeProtocol& proto, const char* nodeId, const char* chipName);
     void update();
     void stop();
 
@@ -46,6 +46,7 @@ private:
         uint32_t lastCounter;
         uint32_t lastSeenMs;
         char     nodeId[11];
+        char     chip[16];
         uint8_t  role;
         int8_t   lastRssi;
     };
@@ -60,6 +61,7 @@ private:
     static const size_t   NONCE_LEN     = 12;  // session || counter || nodeHash
     static const size_t   BODY_HEADER_LEN = 44; // includes node id + payload-length byte
     static const size_t   MAX_PAYLOAD_LEN = 96;
+    static const size_t   MAX_CHIP_LEN    = 15;
     static const size_t   MAX_PACKET_LEN = HEADER_LEN + BODY_HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN;
     static const size_t   REPLAY_SLOTS  = 12;
 
@@ -75,6 +77,7 @@ private:
     static MeshManager* _instance;
 
     char     _nodeId[11] = {0};
+    char     _chipName[16] = {0};
     uint32_t _nodeHash = 0;
     uint32_t _bootId = 0;
 
@@ -118,7 +121,7 @@ private:
                       uint32_t* sessionId, uint32_t* counter, uint32_t* nodeHash,
                       uint32_t* bootId, uint8_t* role, uint32_t* uptimeMs,
                       uint32_t* seq, uint32_t* electionTs,
-                      char nodeIdOut[11]);
+                      char nodeIdOut[11], char chipOut[16]);
     bool encryptPacket(uint8_t type, uint8_t role, uint32_t sessionId,
                        uint32_t counter, uint32_t uptimeMs, uint32_t seq,
                        uint32_t electionTs, const uint8_t* payload,
@@ -126,7 +129,8 @@ private:
                        size_t* outLen);
     bool authenticateAndTrack(uint32_t nodeHash, uint32_t bootId, uint32_t sessionId,
                               uint32_t counter, const char nodeId[11],
-                              uint8_t role, int8_t rssi, bool* firstSeen);
+                              const char chip[16], uint8_t role, int8_t rssi,
+                              bool* firstSeen);
     PeerEntry* findPeer(uint32_t nodeHash);
     PeerEntry* allocPeer();
     void sweepPeers(uint32_t now);

@@ -1304,7 +1304,7 @@ void setup() {
     beacon.begin(proto);
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
-    mesh.begin(proto, getDeviceId().c_str());
+    mesh.begin(proto, getDeviceId().c_str(), CHIP_NAME);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
