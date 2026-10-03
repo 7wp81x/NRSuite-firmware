@@ -7,6 +7,7 @@
 #include "beacon.h"
 #include "deauth_detector.h"
 #include "hidden_ap.h"
+#include "mesh.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -48,6 +49,7 @@ PortalManager  portal;
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
+MeshManager    mesh;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -138,6 +140,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Stop every radio/network subsystem before starting a new one.
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void stopRadioModules() {
+    mesh.stop();
     sniffer.stop();
     deauthDetector.stop();
     hiddenApDetector.stop();
@@ -176,6 +179,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         return;
     }
 
+    // ── MESH FOUNDATION ───────────────────────────────────────────────────
+    if (strncmp(cmd, "MESH_", 5) == 0) {
+        if (strcmp(cmd, "MESH_ACTIVATE") == 0) {
+            stopAllModules();
+        }
+        mesh.handleCommand(id, doc);
+        return;
+    }
+
     // ── PING ──────────────────────────────────────────────────────────────
     if (strcmp(cmd, "PING") == 0) {
         proto.sendResp(id, true, "pong");
@@ -188,8 +200,9 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["uptime"]   = millis();
         resp["heap"]     = ESP.getFreeHeap();
         resp["chip"]      = CHIP_NAME;
-        resp["proto"]     = 1;
-        resp["fw"]        = FW_VERSION;
+        resp["proto"]       = 1;
+        resp["proto_minor"] = 1;
+        resp["fw"]          = FW_VERSION;
         resp["device_id"] = getDeviceId();
         JsonArray features = resp["features"].to<JsonArray>();
         features.add("wifi");
@@ -205,6 +218,12 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("wps");
         features.add("hidden_ap");
         features.add("storage");
+        // Capability flag: mesh code is present and can be provisioned.
+        features.add("mesh_provision");
+        // Availability flag: only advertised once valid derived keys exist.
+        if (mesh.initialized()) {
+            features.add("mesh");
+        }
         #ifdef ENABLE_BLE_HID
             features.add("ble_hid");
             features.add("ble_scan");
@@ -722,6 +741,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
     #ifdef ENABLE_BLE_HID
     else if (strcmp(cmd, "BLE_SCAN_START") == 0) {
+        mesh.stop();
         if (BleHid::isAdvertising() || BleHid::isConnected()) {
             proto.sendResp(id, false, "stop BLE HID before starting BLE scan");
         } else if (bleProfile.active()) {
@@ -742,6 +762,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
 
     else if (strcmp(cmd, "BLE_PROFILE_START") == 0) {
+        mesh.stop();
         const char* address = doc["args"]["address"] | "";
         uint8_t addressType = doc["args"]["address_type"] | 0;
         if (BleHid::isAdvertising() || BleHid::isConnected()) {
@@ -760,6 +781,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
 
     else if (strcmp(cmd, "BLE_START") == 0) {
+        mesh.stop();
         if (bleScanner.active()) {
             proto.sendResp(id, false, "stop BLE scan before starting BLE HID");
         } else if (bleProfile.active()) {
@@ -1282,6 +1304,7 @@ void setup() {
     beacon.begin(proto);
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
+    mesh.begin(proto, getDeviceId().c_str(), CHIP_NAME);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -1300,6 +1323,7 @@ void loop() {
     beacon.update();
     deauthDetector.update();
     hiddenApDetector.update();
+    mesh.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();
