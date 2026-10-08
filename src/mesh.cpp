@@ -127,6 +127,25 @@ void MeshManager::update() {
         if (_lastJoinMs == 0 || now - _lastJoinMs >= JOIN_INTERVAL_MS) {
             sendJoin();
         }
+        if (_lastHealthMs == 0 || now - _lastHealthMs >= NODE_HEALTH_INTERVAL_MS) {
+            _lastHealthMs = now;
+            uint8_t health[MAX_SENSOR_DATA_LEN];
+            const size_t healthLen = buildNodeHealthPayload(health, sizeof(health));
+            if (healthLen > 0) {
+                enqueueSensorReport(REPORT_KIND_NODE_HEALTH, health, healthLen);
+            }
+        }
+        if (_lastSensorSendMs == 0 ||
+            now - _lastSensorSendMs >= SENSOR_SEND_INTERVAL_MS) {
+            sendQueuedSensorReports(now);
+        }
+    }
+
+    if (_role == ROLE_MASTER) {
+        if (_lastHealthMs == 0 || now - _lastHealthMs >= NODE_HEALTH_INTERVAL_MS) {
+            _lastHealthMs = now;
+            sendNodeHealthReport();
+        }
     }
 }
 
@@ -144,6 +163,9 @@ void MeshManager::stop() {
     _pendingChannel = 0;
     _switchAtMs = 0;
     _lastSwitchPacketMs = 0;
+    clearSensorQueue();
+    _lastHealthMs = 0;
+    _lastSensorSendMs = 0;
 
     if (wasActive) {
         sendStatusEvent("stopped");
@@ -473,6 +495,9 @@ bool MeshManager::activate() {
     _lastMasterSeenMs = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
+    clearSensorQueue();
+    _lastHealthMs = 0;
+    _lastSensorSendMs = 0;
     sendStatusEvent("candidate");
     return true;
 }
@@ -484,6 +509,9 @@ void MeshManager::becomeMaster() {
     _seq = 0;
     _lastBroadcastMs = 0;
     _lastPeerSweepMs = 0;
+    _lastHealthMs = 0;
+    _lastSensorSendMs = 0;
+    clearSensorQueue();
     _masterNodeHash = _nodeHash;
     _masterBootId = _bootId;
 
@@ -515,6 +543,10 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     _masterBootId = master.bootId;
     _lastMasterSeenMs = millis();
     _lastJoinMs = 0;
+
+    clearSensorQueue();
+    _lastHealthMs = 0;
+    _lastSensorSendMs = 0;
 
     if (wasCandidate) {
         sendActivationResult(true, "joined existing master");
@@ -618,9 +650,11 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
     uint32_t electionTs = 0;
     char nodeId[11] = {0};
     char chip[16] = {0};
+    uint8_t payloadData[MAX_PAYLOAD_LEN] = {0};
+    size_t payloadLen = 0;
     if (!decodePacket(data, len, &type, &sessionId, &counter, &nodeHash,
                       &bootId, &role, &uptimeMs, &seq, &electionTs,
-                      nodeId, chip)) {
+                      nodeId, chip, payloadData, sizeof(payloadData), &payloadLen)) {
         return;
     }
 
@@ -678,6 +712,30 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
         return;
     }
 
+    if (type == PKT_SENSOR_REPORT) {
+        if (_role != ROLE_MASTER || sessionId != _sessionId) return;
+        if (role != ROLE_CLIENT) return;
+        if (payloadLen < 1) return;
+
+        bool firstSeen = false;
+        if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
+                                  chip, role, rssi, &firstSeen)) {
+            return;
+        }
+
+        PeerEntry* peer = findPeer(nodeHash);
+        if (!peer || peer->role != ROLE_CLIENT) return;
+
+        if (firstSeen) {
+            sendNodeJoinedEvent(*peer, rssi);
+            sendStatusEvent("node_joined");
+        }
+
+        const uint8_t kind = payloadData[0];
+        sendSensorReportEvent(*peer, kind, payloadData + 1, payloadLen - 1, rssi, seq);
+        return;
+    }
+
     if (type == PKT_LEAVE) {
         if (_role != ROLE_MASTER || sessionId != _sessionId) return;
         PeerEntry* peer = findPeer(nodeHash);
@@ -706,12 +764,13 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
                                uint32_t* nodeHash, uint32_t* bootId,
                                uint8_t* role, uint32_t* uptimeMs, uint32_t* seq,
                                uint32_t* electionTs, char nodeIdOut[11],
-                               char chipOut[16]) {
+                               char chipOut[16], uint8_t* payloadOut,
+                               size_t payloadCap, size_t* payloadLenOut) {
     if (data[0] != MESH_PROTOCOL_VERSION) return false;
 
     const uint8_t ptype = data[1];
     if (ptype != PKT_HEARTBEAT && ptype != PKT_JOIN && ptype != PKT_LEAVE &&
-        ptype != PKT_CHANNEL_SWITCH) return false;
+        ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT) return false;
 
     const uint32_t psession = readU32(data + 4);
     const uint32_t pcounter = readU32(data + 8);
@@ -769,10 +828,16 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     tempNodeId[10] = '\0';
 
     char tempChip[16] = {0};
-    if (payloadLen > 0) {
+    if ((ptype == PKT_HEARTBEAT || ptype == PKT_JOIN) && payloadLen > 0) {
         const size_t chipLen = min((size_t)payloadLen, MAX_CHIP_LEN);
         memcpy(tempChip, plain + BODY_HEADER_LEN, chipLen);
         tempChip[chipLen] = '\0';
+    }
+
+    if (payloadLenOut) *payloadLenOut = payloadLen;
+    if (payloadOut && payloadCap > 0 && payloadLen > 0) {
+        const size_t copyLen = min((size_t)payloadLen, payloadCap);
+        memcpy(payloadOut, plain + BODY_HEADER_LEN, copyLen);
     }
 
     *type = ptype;
@@ -931,6 +996,162 @@ void MeshManager::sweepPeers(uint32_t now) {
 
 void MeshManager::clearPeerTable() {
     memset(_peers, 0, sizeof(_peers));
+}
+
+// ── Phase 3A sensor reports ────────────────────────────────────────────────
+
+void MeshManager::clearSensorQueue() {
+    memset(_sensorQueue, 0, sizeof(_sensorQueue));
+}
+
+bool MeshManager::enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t len) {
+    if (len > MAX_SENSOR_DATA_LEN) return false;
+
+    // Keep only the newest health report if one is already queued.
+    for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
+        if (_sensorQueue[i].used && _sensorQueue[i].kind == kind) {
+            _sensorQueue[i].used = false;
+        }
+    }
+
+    SensorReport* slot = nullptr;
+    for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
+        if (!_sensorQueue[i].used) {
+            slot = &_sensorQueue[i];
+            break;
+        }
+    }
+
+    if (!slot) {
+        // Queue full: replace the oldest entry.
+        uint32_t oldest = UINT32_MAX;
+        for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
+            if (_sensorQueue[i].queuedMs < oldest) {
+                oldest = _sensorQueue[i].queuedMs;
+                slot = &_sensorQueue[i];
+            }
+        }
+    }
+    if (!slot) return false;
+
+    slot->used = true;
+    slot->kind = kind;
+    slot->len = (uint8_t)len;
+    slot->queuedMs = millis();
+    if (len > 0 && data) {
+        memcpy(slot->data, data, len);
+    }
+    return true;
+}
+
+void MeshManager::sendQueuedSensorReports(uint32_t now) {
+    _lastSensorSendMs = now;
+    if (!_espNowActive || _role != ROLE_CLIENT || _sessionId == 0) return;
+
+    for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
+        SensorReport& report = _sensorQueue[i];
+        if (!report.used) continue;
+
+        _counter++;
+        if (_counter == 0) _counter = 1;
+        _seq++;
+
+        uint8_t payload[1 + MAX_SENSOR_DATA_LEN];
+        payload[0] = report.kind;
+        if (report.len > 0) {
+            memcpy(payload + 1, report.data, report.len);
+        }
+
+        uint8_t packet[MAX_PACKET_LEN];
+        size_t packetLen = 0;
+        if (!encryptPacket(PKT_SENSOR_REPORT, ROLE_CLIENT, _sessionId, _counter,
+                           millis(), _seq, 0,
+                           payload, (size_t)report.len + 1,
+                           packet, sizeof(packet), &packetLen)) {
+            sendError("encrypt", "sensor report encode failed");
+            _lastSensorSendMs = now;
+            return;
+        }
+
+        const esp_err_t err = esp_now_send(BROADCAST_MAC, packet, packetLen);
+        if (err != ESP_OK) {
+            sendError("send", esp_err_to_name(err));
+            _lastSensorSendMs = now;
+            return;
+        }
+
+        report.used = false;
+        _lastSensorSendMs = now;
+        return;
+    }
+}
+
+size_t MeshManager::buildNodeHealthPayload(uint8_t* out, size_t outCap) const {
+    if (!out || outCap < 10) return 0;
+    writeU32(out, millis());
+    writeU32(out + 4, (uint32_t)ESP.getFreeHeap());
+    out[8] = _channel;
+    out[9] = _role;
+    return 10;
+}
+
+void MeshManager::sendNodeHealthReport() {
+    if (!_proto || _role != ROLE_MASTER || _sessionId == 0) return;
+
+    uint8_t health[10];
+    const size_t healthLen = buildNodeHealthPayload(health, sizeof(health));
+    if (healthLen == 0) return;
+
+    PeerEntry self = {};
+    self.used = true;
+    self.nodeHash = _nodeHash;
+    self.bootId = _bootId;
+    self.sessionId = _sessionId;
+    self.lastSeenMs = millis();
+    self.role = ROLE_MASTER;
+    self.lastRssi = 0;
+    strncpy(self.nodeId, _nodeId, sizeof(self.nodeId) - 1);
+    strncpy(self.chip, _chipName, sizeof(self.chip) - 1);
+
+    sendSensorReportEvent(self, REPORT_KIND_NODE_HEALTH, health, healthLen, 0, _seq);
+}
+
+const char* MeshManager::reportKindName(uint8_t kind) {
+    switch (kind) {
+        case REPORT_KIND_NODE_HEALTH: return "node_health";
+        default: return "unknown";
+    }
+}
+
+void MeshManager::sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
+                                        const uint8_t* data, size_t len,
+                                        int8_t rssi, uint32_t seq) {
+    if (!_proto) return;
+
+    JsonDocument doc;
+    doc["node_id"] = peer.nodeId;
+    if (peer.chip[0]) doc["chip"] = peer.chip;
+    doc["role"] = (peer.role == ROLE_MASTER) ? "master" : "client";
+    if (peer.sessionId != 0) doc["session_id"] = peer.sessionId;
+    doc["kind"] = reportKindName(kind);
+    doc["seq"] = seq;
+    doc["rssi"] = rssi;
+    doc["channel"] = _channel;
+
+    if (kind == REPORT_KIND_NODE_HEALTH && len >= 10) {
+        doc["uptime_ms"] = readU32(data);
+        doc["heap"] = readU32(data + 4);
+        doc["channel"] = data[8];
+        doc["role"] = (data[9] == ROLE_MASTER) ? "master" : "client";
+    } else if (len > 0 && data) {
+        char encoded[192];
+        if (base64Encode(data, len, encoded, sizeof(encoded))) {
+            doc["data_b64"] = encoded;
+            doc["data_len"] = (uint32_t)len;
+        }
+    }
+
+    _proto->sendEvent("mesh_sensor_report", doc);
 }
 
 // ── USB event helpers ────────────────────────────────────────────────────────

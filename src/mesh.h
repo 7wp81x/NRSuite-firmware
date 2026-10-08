@@ -56,6 +56,9 @@ private:
     static const uint8_t  PKT_JOIN      = 2;
     static const uint8_t  PKT_LEAVE     = 3;
     static const uint8_t  PKT_CHANNEL_SWITCH = 4;
+    static const uint8_t  PKT_SENSOR_REPORT  = 5;
+
+    static const uint8_t  REPORT_KIND_NODE_HEALTH = 1;
 
     static const size_t   HEADER_LEN    = 20;  // version,type,rsvd,session,counter,nodeHash,bootId
     static const size_t   TAG_LEN       = 16;  // AES-CCM tag
@@ -65,6 +68,17 @@ private:
     static const size_t   MAX_CHIP_LEN    = 15;
     static const size_t   MAX_PACKET_LEN = HEADER_LEN + BODY_HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN;
     static const size_t   REPLAY_SLOTS  = 12;
+
+    static const size_t   SENSOR_QUEUE_SLOTS = 6;
+    static const size_t   MAX_SENSOR_DATA_LEN = 64;
+
+    struct SensorReport {
+        bool     used;
+        uint8_t  kind;
+        uint8_t  len;
+        uint8_t  data[MAX_SENSOR_DATA_LEN];
+        uint32_t queuedMs;
+    };
 
     static const uint32_t ELECTION_WINDOW_MS   = 1200;
     static const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
@@ -76,6 +90,8 @@ private:
     static const uint32_t MESH_SCAN_DWELL_MS   = 500;
     static const uint32_t CHANNEL_SWITCH_DELAY_MS = 3000;
     static const uint16_t CHANNEL_SWITCH_REPEAT_MS = 500;
+    static const uint32_t NODE_HEALTH_INTERVAL_MS = 5000;
+    static const uint32_t SENSOR_SEND_INTERVAL_MS = 1000;
 
     BridgeProtocol* _proto = nullptr;
     static MeshManager* _instance;
@@ -114,6 +130,10 @@ private:
 
     PeerEntry _peers[REPLAY_SLOTS] = {};
 
+    SensorReport _sensorQueue[SENSOR_QUEUE_SLOTS] = {};
+    uint32_t _lastHealthMs = 0;
+    uint32_t _lastSensorSendMs = 0;
+
     bool loadKeys();
     bool storeKeys();
     bool loadChannel();
@@ -139,7 +159,8 @@ private:
                       uint32_t* sessionId, uint32_t* counter, uint32_t* nodeHash,
                       uint32_t* bootId, uint8_t* role, uint32_t* uptimeMs,
                       uint32_t* seq, uint32_t* electionTs,
-                      char nodeIdOut[11], char chipOut[16]);
+                      char nodeIdOut[11], char chipOut[16],
+                      uint8_t* payloadOut, size_t payloadCap, size_t* payloadLenOut);
     bool encryptPacket(uint8_t type, uint8_t role, uint32_t sessionId,
                        uint32_t counter, uint32_t uptimeMs, uint32_t seq,
                        uint32_t electionTs, const uint8_t* payload,
@@ -153,6 +174,16 @@ private:
     PeerEntry* allocPeer();
     void sweepPeers(uint32_t now);
     void clearPeerTable();
+
+    bool enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t len);
+    void sendQueuedSensorReports(uint32_t now);
+    void sendNodeHealthReport();
+    void clearSensorQueue();
+    void sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
+                               const uint8_t* data, size_t len,
+                               int8_t rssi, uint32_t seq);
+    size_t buildNodeHealthPayload(uint8_t* out, size_t outCap) const;
+    static const char* reportKindName(uint8_t kind);
 
     void sendResp(uint8_t id, bool ok, const char* msg = nullptr);
     void sendStatusEvent(const char* reason = nullptr);
