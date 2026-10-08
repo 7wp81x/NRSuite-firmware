@@ -27,8 +27,17 @@ struct DeauthDetectStats {
 
 class DeauthDetector {
 public:
+    using AlertSink = void (*)(uint16_t reason, uint8_t channel, int8_t rssi,
+                               const uint8_t* source, const uint8_t* target);
+
     void begin(BridgeProtocol& proto);
     static DeauthDetector* instance() { return _instance; }
+    void setAlertSink(AlertSink sink) { _alertSink = sink; }
+    // When true, another owner (MeshManager/scheduler) controls the radio
+    // channel and promiscuous mode. The detector still configures its packet
+    // filter/callback and processes frames, but never touches the radio state.
+    void setExternalRadio(bool external) { _externalRadio = external; }
+    void setChannelHint(uint8_t channel) { _channel = channel; }
 
     bool start(const DeauthDetectConfig& config);
     void stop();
@@ -61,6 +70,8 @@ private:
 
     BridgeProtocol* _proto = nullptr;
     QueueHandle_t   _queue = nullptr;
+    AlertSink       _alertSink = nullptr;
+    bool            _externalRadio = false;
 
     volatile bool   _active = false;
     bool            _hopMode = false;

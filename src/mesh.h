@@ -24,6 +24,31 @@ public:
 
     void handleCommand(uint8_t id, JsonDocument& doc);
 
+    using DetectorControlCallback = void (*)(bool start, uint8_t mode,
+                                             uint8_t channel,
+                                             uint16_t meshWindowMs,
+                                             uint16_t detectorWindowMs,
+                                             uint16_t hopDwellMs);
+
+    void setDetectorControlCallback(DetectorControlCallback cb) {
+        _detectorControlCallback = cb;
+    }
+
+    bool beginDistributedDetector(bool start, uint8_t mode, uint8_t channel,
+                                  uint16_t meshWindowMs,
+                                  uint16_t detectorWindowMs,
+                                  uint16_t hopDwellMs);
+    // Detector-window radio ownership. MeshManager owns the radio while the
+    // detector window is active; the scheduler calls these hooks rather than
+    // touching esp_wifi_set_channel/promiscuous directly.
+    bool enterDetectorWindow(uint8_t channel, bool pauseMesh);
+    bool setDetectorWindowChannel(uint8_t channel);
+    void exitDetectorWindow();
+    bool detectorWindowActive() const { return _detectorRadioActive; }
+    uint8_t currentChannel() const { return _channel; }
+    bool enqueueDeauthReport(uint16_t reason, uint8_t channel, int8_t rssi,
+                             const uint8_t* source, const uint8_t* target);
+
     bool initialized() const { return _initialized; }
     bool active() const { return _role != ROLE_DISABLED; }
     const char* roleName() const;
@@ -57,8 +82,10 @@ private:
     static const uint8_t  PKT_LEAVE     = 3;
     static const uint8_t  PKT_CHANNEL_SWITCH = 4;
     static const uint8_t  PKT_SENSOR_REPORT  = 5;
+    static const uint8_t  PKT_DETECTOR_CONTROL = 6;
 
     static const uint8_t  REPORT_KIND_NODE_HEALTH = 1;
+    static const uint8_t  REPORT_KIND_DEAUTH      = 2;
 
     static const size_t   HEADER_LEN    = 20;  // version,type,rsvd,session,counter,nodeHash,bootId
     static const size_t   TAG_LEN       = 16;  // AES-CCM tag
@@ -76,7 +103,9 @@ private:
         bool     used;
         uint8_t  kind;
         uint8_t  len;
+        uint8_t  sends;
         uint8_t  data[MAX_SENSOR_DATA_LEN];
+        uint32_t seq;
         uint32_t queuedMs;
     };
 
@@ -133,6 +162,19 @@ private:
     SensorReport _sensorQueue[SENSOR_QUEUE_SLOTS] = {};
     uint32_t _lastHealthMs = 0;
     uint32_t _lastSensorSendMs = 0;
+    uint32_t _sensorSeq = 0;
+    DetectorControlCallback _detectorControlCallback = nullptr;
+    bool     _detectorWindowActive = false;   // true while mesh updates are paused
+    bool     _detectorRadioActive = false;    // true whenever promiscuous RX is on
+    bool     _detectorControlPending = false;
+    bool     _detectorControlStart = false;
+    uint8_t  _detectorControlMode = 1;  // 0=same_channel, 1=fixed, 2=hop
+    uint8_t  _detectorControlChannel = 1;
+    uint16_t _detectorControlMeshWindowMs = 4500;
+    uint16_t _detectorControlDetectorWindowMs = 1500;
+    uint16_t _detectorControlHopDwellMs = 350;
+    uint8_t  _detectorControlRetriesLeft = 0;
+    uint32_t _detectorControlNextSendMs = 0;
 
     bool loadKeys();
     bool storeKeys();
@@ -175,7 +217,8 @@ private:
     void sweepPeers(uint32_t now);
     void clearPeerTable();
 
-    bool enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t len);
+    bool enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t len,
+                             bool latestOnly, uint32_t seq = 0);
     void sendQueuedSensorReports(uint32_t now);
     void sendNodeHealthReport();
     void clearSensorQueue();
@@ -184,6 +227,12 @@ private:
                                int8_t rssi, uint32_t seq);
     size_t buildNodeHealthPayload(uint8_t* out, size_t outCap) const;
     static const char* reportKindName(uint8_t kind);
+    uint32_t nextSensorSeq();
+    void sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
+                             uint16_t meshWindowMs, uint16_t detectorWindowMs,
+                             uint16_t hopDwellMs);
+    void handleDetectorControl(const uint8_t* data, size_t len);
+    void sweepDetectorControl(uint32_t now);
 
     void sendResp(uint8_t id, bool ok, const char* msg = nullptr);
     void sendStatusEvent(const char* reason = nullptr);

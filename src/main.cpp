@@ -50,6 +50,208 @@ BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
 MeshManager    mesh;
+
+// ── Phase 3B distributed deauth detector scheduler ──────────────────────────
+// The scheduler is the single owner of the duty-cycle decision. During a
+// distributed detector window it calls MeshManager radio hooks, which are the
+// only code paths allowed to touch esp_wifi_set_channel/promiscuous.
+enum DistDetectorMode : uint8_t {
+    DIST_MODE_SAME_CHANNEL = 0,
+    DIST_MODE_FIXED        = 1,
+    DIST_MODE_HOP          = 2,
+};
+
+static const uint16_t DIST_DEFAULT_MESH_WINDOW_MS     = 4500;
+static const uint16_t DIST_DEFAULT_DETECTOR_WINDOW_MS = 1500;
+static const uint16_t DIST_DEFAULT_HOP_DWELL_MS       = 350;
+
+static bool     gDistControlActive = false;
+static bool     gDistConfigInitialized = false;
+static bool     gDistLocalActive = false;
+static bool     gDistPendingStart = false;
+static bool     gDistPendingStop = false;
+static uint8_t  gDistMode = DIST_MODE_FIXED;
+static uint8_t  gDistChannel = 1;
+static uint16_t gDistMeshWindowMs = DIST_DEFAULT_MESH_WINDOW_MS;
+static uint16_t gDistDetectorWindowMs = DIST_DEFAULT_DETECTOR_WINDOW_MS;
+static uint16_t gDistHopDwellMs = DIST_DEFAULT_HOP_DWELL_MS;
+static bool     gDistDetectorWindowActive = false;
+static uint32_t gDistNextSwitchMs = 0;
+static uint8_t  gDistHopChannel = 1;
+static uint32_t gDistLastHopMs = 0;
+
+static bool detectorNodeIsMaster() {
+    return strcmp(mesh.roleName(), "master") == 0;
+}
+
+static bool detectorNodeIsClient() {
+    return strcmp(mesh.roleName(), "client") == 0;
+}
+
+static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
+                                          uint16_t meshWindowMs,
+                                          uint16_t detectorWindowMs,
+                                          uint16_t hopDwellMs) {
+    if (!detectorNodeIsMaster() && !detectorNodeIsClient()) return;
+
+    gDistMode = mode;
+    gDistChannel = channel;
+    gDistMeshWindowMs = meshWindowMs;
+    gDistDetectorWindowMs = detectorWindowMs;
+    gDistHopDwellMs = hopDwellMs;
+
+    deauthDetector.setExternalRadio(true);
+
+    DeauthDetectConfig cfg;
+    cfg.hop = (mode == DIST_MODE_HOP);
+    cfg.channel = (mode == DIST_MODE_SAME_CHANNEL) ? mesh.currentChannel() : channel;
+    cfg.intervalMs = hopDwellMs;
+    if (!deauthDetector.start(cfg)) {
+        deauthDetector.setExternalRadio(false);
+        gDistLocalActive = false;
+        gDistDetectorWindowActive = false;
+        return;
+    }
+
+    gDistLocalActive = true;
+    gDistDetectorWindowActive = false;
+    gDistNextSwitchMs = 0;
+    gDistHopChannel = (mode == DIST_MODE_HOP) ? 1 : channel;
+
+    if (mode == DIST_MODE_SAME_CHANNEL) {
+        // Experimental single-channel coexistence mode.
+        if (mesh.enterDetectorWindow(mesh.currentChannel(), false)) {
+            gDistDetectorWindowActive = true;
+        }
+    }
+}
+
+static void stopDistributedDetectorLocal() {
+    if (gDistDetectorWindowActive) {
+        mesh.exitDetectorWindow();
+    }
+    if (deauthDetector.active()) {
+        deauthDetector.stop();
+    }
+    deauthDetector.setExternalRadio(false);
+    gDistLocalActive = false;
+    gDistDetectorWindowActive = false;
+    gDistNextSwitchMs = 0;
+    gDistPendingStart = false;
+    gDistPendingStop = false;
+}
+
+static void abortDistributedDetectorForRadioStop() {
+    if (!gDistControlActive && !gDistLocalActive &&
+        !gDistPendingStart && !gDistPendingStop) {
+        return;
+    }
+    stopDistributedDetectorLocal();
+    gDistControlActive = false;
+}
+
+static void distributedDetectorControlCallback(bool start, uint8_t mode,
+                                               uint8_t channel,
+                                               uint16_t meshWindowMs,
+                                               uint16_t detectorWindowMs,
+                                               uint16_t hopDwellMs) {
+    if (start) {
+        const bool sameConfig =
+            gDistConfigInitialized &&
+            gDistMode == mode &&
+            gDistChannel == channel &&
+            gDistMeshWindowMs == meshWindowMs &&
+            gDistDetectorWindowMs == detectorWindowMs &&
+            gDistHopDwellMs == hopDwellMs;
+        if (sameConfig && (gDistLocalActive || gDistPendingStart)) {
+            return;  // repeated start control is idempotent
+        }
+        gDistConfigInitialized = true;
+        gDistMode = mode;
+        gDistChannel = channel;
+        gDistMeshWindowMs = meshWindowMs;
+        gDistDetectorWindowMs = detectorWindowMs;
+        gDistHopDwellMs = hopDwellMs;
+        gDistPendingStart = true;
+        gDistPendingStop = false;
+    } else {
+        if (!gDistControlActive && !gDistLocalActive && !gDistPendingStart) {
+            return;  // repeated stop control is idempotent
+        }
+        gDistConfigInitialized = false;
+        gDistPendingStop = true;
+    }
+}
+
+static void updateDistributedDetectorScheduler() {
+    if (gDistPendingStop) {
+        gDistPendingStop = false;
+        stopDistributedDetectorLocal();
+        gDistControlActive = false;
+        return;
+    }
+
+    if (!detectorNodeIsMaster() && !detectorNodeIsClient()) {
+        if (gDistLocalActive) {
+            stopDistributedDetectorLocal();
+        }
+        gDistControlActive = false;
+        return;
+    }
+
+    if (gDistPendingStart) {
+        gDistPendingStart = false;
+        gDistControlActive = true;
+        // The master stays on the mesh channel for fixed/hop. In same_channel
+        // mode the detector is a continuous experimental extra on the same
+        // channel, so the master may also scan.
+        if (detectorNodeIsMaster() && gDistMode != DIST_MODE_SAME_CHANNEL) {
+            gDistLocalActive = false;
+            return;
+        }
+        startDistributedDetectorLocal(gDistMode, gDistChannel, gDistMeshWindowMs,
+                                      gDistDetectorWindowMs, gDistHopDwellMs);
+    }
+
+    if (!gDistLocalActive) return;
+
+    const uint32_t now = millis();
+
+    if (gDistMode == DIST_MODE_SAME_CHANNEL) {
+        return;  // MeshManager owns the shared-channel detector window continuously.
+    }
+
+    if (!gDistDetectorWindowActive) {
+        if (gDistNextSwitchMs == 0 || now >= gDistNextSwitchMs) {
+            const uint8_t firstChannel = (gDistMode == DIST_MODE_HOP) ? 1 : gDistChannel;
+            if (mesh.enterDetectorWindow(firstChannel, true)) {
+                gDistDetectorWindowActive = true;
+                gDistHopChannel = firstChannel;
+                gDistLastHopMs = now;
+                gDistNextSwitchMs = now + gDistDetectorWindowMs;
+                deauthDetector.setChannelHint(firstChannel);
+            } else {
+                gDistNextSwitchMs = now + 1000;
+            }
+        }
+        return;
+    }
+
+    if (gDistMode == DIST_MODE_HOP && now - gDistLastHopMs >= gDistHopDwellMs) {
+        gDistHopChannel = (gDistHopChannel % 13) + 1;
+        if (mesh.setDetectorWindowChannel(gDistHopChannel)) {
+            deauthDetector.setChannelHint(gDistHopChannel);
+            gDistLastHopMs = now;
+        }
+    }
+
+    if (now >= gDistNextSwitchMs) {
+        mesh.exitDetectorWindow();
+        gDistDetectorWindowActive = false;
+        gDistNextSwitchMs = now + gDistMeshWindowMs;
+    }
+}
+
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -140,6 +342,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Stop every radio/network subsystem before starting a new one.
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void stopRadioModules() {
+    abortDistributedDetectorForRadioStop();
     mesh.stop();
     sniffer.stop();
     deauthDetector.stop();
@@ -554,11 +757,82 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── DEAUTH DETECTOR ───────────────────────────────────────────────────
     else if (strcmp(cmd, "DEAUTH_DETECT_START") == 0) {
+        const bool distributed = doc["args"]["mesh"] | false;
+
+        if (distributed) {
+            if (!detectorNodeIsMaster()) {
+                proto.sendResp(id, false, "distributed detector control requires the mesh master");
+                return;
+            }
+
+            const char* mode = doc["args"]["mode"] | "fixed";
+            uint8_t distMode = DIST_MODE_FIXED;
+            if (strcmp(mode, "same_channel") == 0) {
+                distMode = DIST_MODE_SAME_CHANNEL;
+            } else if (strcmp(mode, "hop") == 0) {
+                distMode = DIST_MODE_HOP;
+            }
+
+            uint8_t requestedChannel = doc["args"]["channel"] | mesh.currentChannel();
+            if (distMode == DIST_MODE_SAME_CHANNEL) {
+                requestedChannel = mesh.currentChannel();
+            }
+            if (requestedChannel < 1 || requestedChannel > 13) {
+                proto.sendResp(id, false, "invalid channel (must be 1-13)");
+                return;
+            }
+
+            uint16_t meshWindowMs = doc["args"]["mesh_window_ms"] | DIST_DEFAULT_MESH_WINDOW_MS;
+            uint16_t detectorWindowMs = doc["args"]["detector_window_ms"] | DIST_DEFAULT_DETECTOR_WINDOW_MS;
+            uint16_t hopDwellMs = doc["args"]["detector_hop_dwell_ms"] |
+                                  (doc["args"]["interval_ms"] | DIST_DEFAULT_HOP_DWELL_MS);
+            meshWindowMs = (uint16_t)constrain((int)meshWindowMs, 2000, 10000);
+            detectorWindowMs = (uint16_t)constrain((int)detectorWindowMs, 300, 2500);
+            hopDwellMs = (uint16_t)constrain((int)hopDwellMs, 200, 1000);
+
+            if (!mesh.beginDistributedDetector(true, distMode, requestedChannel,
+                                               meshWindowMs, detectorWindowMs,
+                                               hopDwellMs)) {
+                proto.sendResp(id, false, "mesh not active");
+                return;
+            }
+
+            gDistMode = distMode;
+            gDistChannel = requestedChannel;
+            gDistMeshWindowMs = meshWindowMs;
+            gDistDetectorWindowMs = detectorWindowMs;
+            gDistHopDwellMs = hopDwellMs;
+            gDistControlActive = true;
+
+            const bool masterScans = (distMode == DIST_MODE_SAME_CHANNEL);
+            if (masterScans) {
+                startDistributedDetectorLocal(distMode, requestedChannel,
+                                              meshWindowMs, detectorWindowMs,
+                                              hopDwellMs);
+            } else {
+                gDistLocalActive = false;
+            }
+
+            JsonDocument resp;
+            resp["ok"]                 = true;
+            resp["distributed"]        = true;
+            resp["mode"]               = mode;
+            resp["channel"]            = requestedChannel;
+            resp["mesh_window_ms"]     = meshWindowMs;
+            resp["detector_window_ms"] = detectorWindowMs;
+            resp["interval_ms"]        = hopDwellMs;
+            resp["master_scanning"]    = masterScans;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
         radioIdle();
 
         DeauthDetectConfig cfg;
-        const char* mode = doc["args"]["mode"] | "fixed";
-        cfg.hop = (strcmp(mode, "hop") == 0) || (doc["args"]["hop"] | false);
+        const char* localMode = doc["args"]["mode"] | "fixed";
+        cfg.hop = (strcmp(localMode, "hop") == 0) || (doc["args"]["hop"] | false);
         cfg.channel = doc["args"]["channel"] | 1;
         cfg.intervalMs = doc["args"]["interval_ms"] | 300;
 
@@ -594,12 +868,24 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     else if (strcmp(cmd, "DEAUTH_DETECT_STOP") == 0) {
         DeauthDetectStats s = deauthDetector.stats();
-        deauthDetector.stop();
+        const bool wasDistributed = gDistControlActive || gDistLocalActive;
+        if (wasDistributed) {
+            mesh.beginDistributedDetector(false, gDistMode, gDistChannel,
+                                          gDistMeshWindowMs,
+                                          gDistDetectorWindowMs,
+                                          gDistHopDwellMs);
+            stopDistributedDetectorLocal();
+            gDistControlActive = false;
+        } else {
+            deauthDetector.stop();
+        }
+
         JsonDocument resp;
-        resp["ok"]       = true;
-        resp["detected"] = s.detected;
-        resp["sent"]     = s.sent;
-        resp["dropped"]  = s.dropped;
+        resp["ok"]          = true;
+        resp["detected"]    = s.detected;
+        resp["sent"]        = s.sent;
+        resp["dropped"]     = s.dropped;
+        resp["distributed"] = wasDistributed;
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
@@ -607,13 +893,16 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "DEAUTH_DETECT_STATUS") == 0) {
         DeauthDetectStats s = deauthDetector.stats();
         JsonDocument resp;
-        resp["ok"]       = true;
-        resp["active"]   = deauthDetector.active();
-        resp["hopping"]  = deauthDetector.hopping();
-        resp["channel"]  = deauthDetector.channel();
-        resp["detected"] = s.detected;
-        resp["sent"]     = s.sent;
-        resp["dropped"]  = s.dropped;
+        resp["ok"]        = true;
+        resp["active"]    = deauthDetector.active();
+        resp["hopping"]   = deauthDetector.hopping();
+        resp["channel"]   = deauthDetector.channel();
+        resp["detected"]  = s.detected;
+        resp["sent"]      = s.sent;
+        resp["dropped"]   = s.dropped;
+        resp["distributed"] = gDistControlActive;
+        resp["distributed_mode"] = gDistMode;
+        resp["distributed_local_scanning"] = gDistLocalActive;
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
@@ -1305,6 +1594,11 @@ void setup() {
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
     mesh.begin(proto, getDeviceId().c_str(), CHIP_NAME);
+    deauthDetector.setAlertSink([](uint16_t reason, uint8_t channel, int8_t rssi,
+                                   const uint8_t* source, const uint8_t* target) {
+        mesh.enqueueDeauthReport(reason, channel, rssi, source, target);
+    });
+    mesh.setDetectorControlCallback(distributedDetectorControlCallback);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -1321,6 +1615,7 @@ void loop() {
     sniffer.handleHop();
     portal.update();
     beacon.update();
+    updateDistributedDetectorScheduler();
     deauthDetector.update();
     hiddenApDetector.update();
     mesh.update();

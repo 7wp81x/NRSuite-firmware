@@ -62,6 +62,15 @@ void MeshManager::update() {
 
     const uint32_t now = millis();
 
+    if (_role == ROLE_MASTER) {
+        sweepDetectorControl(now);
+    }
+
+    // A client detector window owns the radio. Do not let mesh heartbeats,
+    // joins, recovery scans, or channel switches touch the radio while the
+    // detector is scanning off the mesh channel.
+    if (_detectorWindowActive) return;
+
     if (_role == ROLE_CANDIDATE) {
         if (now - _candidateSinceMs >= ELECTION_WINDOW_MS) {
             becomeMaster();
@@ -132,7 +141,7 @@ void MeshManager::update() {
             uint8_t health[MAX_SENSOR_DATA_LEN];
             const size_t healthLen = buildNodeHealthPayload(health, sizeof(health));
             if (healthLen > 0) {
-                enqueueSensorReport(REPORT_KIND_NODE_HEALTH, health, healthLen);
+                enqueueSensorReport(REPORT_KIND_NODE_HEALTH, health, healthLen, true);
             }
         }
         if (_lastSensorSendMs == 0 ||
@@ -151,6 +160,14 @@ void MeshManager::update() {
 
 void MeshManager::stop() {
     const bool wasActive = (_role != ROLE_DISABLED);
+    if (_detectorRadioActive) {
+        esp_wifi_set_promiscuous(false);
+        _detectorRadioActive = false;
+    }
+    _detectorWindowActive = false;
+    _detectorControlPending = false;
+    _detectorControlRetriesLeft = 0;
+    _detectorControlNextSendMs = 0;
     stopRadio();
     _role = ROLE_DISABLED;
     _sessionId = 0;
@@ -720,6 +737,17 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
         return;
     }
 
+    if (type == PKT_DETECTOR_CONTROL) {
+        if (role != ROLE_MASTER || sessionId != _sessionId) return;
+        bool firstSeen = false;
+        if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
+                                  chip, role, rssi, &firstSeen)) {
+            return;
+        }
+        handleDetectorControl(payloadData, payloadLen);
+        return;
+    }
+
     if (type == PKT_SENSOR_REPORT) {
         if (_role != ROLE_MASTER || sessionId != _sessionId) return;
         if (role != ROLE_CLIENT) return;
@@ -778,7 +806,8 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
 
     const uint8_t ptype = data[1];
     if (ptype != PKT_HEARTBEAT && ptype != PKT_JOIN && ptype != PKT_LEAVE &&
-        ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT) return false;
+        ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT &&
+        ptype != PKT_DETECTOR_CONTROL) return false;
 
     const uint32_t psession = readU32(data + 4);
     const uint32_t pcounter = readU32(data + 8);
@@ -1012,13 +1041,17 @@ void MeshManager::clearSensorQueue() {
     memset(_sensorQueue, 0, sizeof(_sensorQueue));
 }
 
-bool MeshManager::enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t len) {
+bool MeshManager::enqueueSensorReport(uint8_t kind, const uint8_t* data,
+                                       size_t len, bool latestOnly,
+                                       uint32_t seq) {
     if (len > MAX_SENSOR_DATA_LEN) return false;
+    if (seq == 0) seq = nextSensorSeq();
 
-    // Keep only the newest health report if one is already queued.
-    for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
-        if (_sensorQueue[i].used && _sensorQueue[i].kind == kind) {
-            _sensorQueue[i].used = false;
+    if (latestOnly) {
+        for (size_t i = 0; i < SENSOR_QUEUE_SLOTS; i++) {
+            if (_sensorQueue[i].used && _sensorQueue[i].kind == kind) {
+                _sensorQueue[i].used = false;
+            }
         }
     }
 
@@ -1045,11 +1078,19 @@ bool MeshManager::enqueueSensorReport(uint8_t kind, const uint8_t* data, size_t 
     slot->used = true;
     slot->kind = kind;
     slot->len = (uint8_t)len;
+    slot->sends = 0;
+    slot->seq = seq;
     slot->queuedMs = millis();
     if (len > 0 && data) {
         memcpy(slot->data, data, len);
     }
     return true;
+}
+
+uint32_t MeshManager::nextSensorSeq() {
+    _sensorSeq++;
+    if (_sensorSeq == 0) _sensorSeq = 1;
+    return _sensorSeq;
 }
 
 void MeshManager::sendQueuedSensorReports(uint32_t now) {
@@ -1062,7 +1103,6 @@ void MeshManager::sendQueuedSensorReports(uint32_t now) {
 
         _counter++;
         if (_counter == 0) _counter = 1;
-        _seq++;
 
         uint8_t payload[1 + MAX_SENSOR_DATA_LEN];
         payload[0] = report.kind;
@@ -1073,7 +1113,7 @@ void MeshManager::sendQueuedSensorReports(uint32_t now) {
         uint8_t packet[MAX_PACKET_LEN];
         size_t packetLen = 0;
         if (!encryptPacket(PKT_SENSOR_REPORT, ROLE_CLIENT, _sessionId, _counter,
-                           millis(), _seq, 0,
+                           millis(), report.seq, 0,
                            payload, (size_t)report.len + 1,
                            packet, sizeof(packet), &packetLen)) {
             sendError("encrypt", "sensor report encode failed");
@@ -1088,7 +1128,18 @@ void MeshManager::sendQueuedSensorReports(uint32_t now) {
             return;
         }
 
-        report.used = false;
+        // Deauth observations are retried with the same stable seq so the
+        // Android app can dedupe them. Health reports remain latest-only.
+        if (report.kind == REPORT_KIND_DEAUTH) {
+            report.sends++;
+            if (report.sends < 3) {
+                report.queuedMs = now;
+            } else {
+                report.used = false;
+            }
+        } else {
+            report.used = false;
+        }
         _lastSensorSendMs = now;
         return;
     }
@@ -1127,7 +1178,8 @@ void MeshManager::sendNodeHealthReport() {
 const char* MeshManager::reportKindName(uint8_t kind) {
     switch (kind) {
         case REPORT_KIND_NODE_HEALTH: return "node_health";
-        default: return "unknown";
+        case REPORT_KIND_DEAUTH:      return "deauth";
+        default:                      return "unknown";
     }
 }
 
@@ -1151,6 +1203,19 @@ void MeshManager::sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
         doc["heap"] = readU32(data + 4);
         doc["channel"] = data[8];
         doc["role"] = (data[9] == ROLE_MASTER) ? "master" : "client";
+    } else if (kind == REPORT_KIND_DEAUTH && len >= 16) {
+        const uint16_t reason = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+        char source[18];
+        char target[18];
+        snprintf(source, sizeof(source), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 data[4], data[5], data[6], data[7], data[8], data[9]);
+        snprintf(target, sizeof(target), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 data[10], data[11], data[12], data[13], data[14], data[15]);
+        doc["reason"] = reason;
+        doc["channel"] = data[2];
+        doc["rssi"] = (int8_t)data[3];
+        doc["source"] = source;
+        doc["target"] = target;
     } else if (len > 0 && data) {
         char encoded[192];
         if (base64Encode(data, len, encoded, sizeof(encoded))) {
@@ -1160,6 +1225,166 @@ void MeshManager::sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
     }
 
     _proto->sendEvent("mesh_sensor_report", doc);
+}
+
+// ── Phase 3B detector control ──────────────────────────────────────────────
+
+bool MeshManager::enqueueDeauthReport(uint16_t reason, uint8_t channel,
+                                      int8_t rssi, const uint8_t* source,
+                                      const uint8_t* target) {
+    if (!source || !target || !_espNowActive || _sessionId == 0) return false;
+
+    uint8_t payload[16] = {0};
+    payload[0] = (uint8_t)(reason & 0xFF);
+    payload[1] = (uint8_t)((reason >> 8) & 0xFF);
+    payload[2] = channel;
+    payload[3] = (uint8_t)rssi;
+    memcpy(payload + 4, source, 6);
+    memcpy(payload + 10, target, 6);
+
+    if (_role == ROLE_MASTER) {
+        PeerEntry self = {};
+        self.used = true;
+        self.nodeHash = _nodeHash;
+        self.bootId = _bootId;
+        self.sessionId = _sessionId;
+        self.lastSeenMs = millis();
+        self.role = ROLE_MASTER;
+        self.lastRssi = 0;
+        strncpy(self.nodeId, _nodeId, sizeof(self.nodeId) - 1);
+        strncpy(self.chip, _chipName, sizeof(self.chip) - 1);
+        sendSensorReportEvent(self, REPORT_KIND_DEAUTH, payload, sizeof(payload),
+                              0, nextSensorSeq());
+        return true;
+    }
+
+    if (_role != ROLE_CLIENT) return false;
+    return enqueueSensorReport(REPORT_KIND_DEAUTH, payload, sizeof(payload), false);
+}
+
+bool MeshManager::enterDetectorWindow(uint8_t channel, bool pauseMesh) {
+    if (!_espNowActive) return false;
+    if (channel < 1 || channel > 13) return false;
+
+    _detectorWindowActive = pauseMesh;
+    _detectorRadioActive = true;
+    const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        _detectorWindowActive = false;
+        _detectorRadioActive = false;
+        return false;
+    }
+    esp_wifi_set_promiscuous(true);
+    return true;
+}
+
+bool MeshManager::setDetectorWindowChannel(uint8_t channel) {
+    if (!_espNowActive || !_detectorWindowActive) return false;
+    if (channel < 1 || channel > 13) return false;
+    return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) == ESP_OK;
+}
+
+void MeshManager::exitDetectorWindow() {
+    _detectorWindowActive = false;
+    _detectorRadioActive = false;
+    esp_wifi_set_promiscuous(false);
+    if (_espNowActive) {
+        esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+    }
+}
+
+void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
+                                      uint16_t meshWindowMs,
+                                      uint16_t detectorWindowMs,
+                                      uint16_t hopDwellMs) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+
+    uint8_t payload[9];
+    payload[0] = start ? 1 : 0;
+    payload[1] = mode;
+    payload[2] = channel;
+    payload[3] = (uint8_t)(meshWindowMs & 0xFF);
+    payload[4] = (uint8_t)((meshWindowMs >> 8) & 0xFF);
+    payload[5] = (uint8_t)(detectorWindowMs & 0xFF);
+    payload[6] = (uint8_t)((detectorWindowMs >> 8) & 0xFF);
+    payload[7] = (uint8_t)(hopDwellMs & 0xFF);
+    payload[8] = (uint8_t)((hopDwellMs >> 8) & 0xFF);
+
+    _counter++;
+    if (_counter == 0) _counter = 1;
+    _seq++;
+
+    uint8_t packet[MAX_PACKET_LEN];
+    size_t packetLen = 0;
+    if (!encryptPacket(PKT_DETECTOR_CONTROL, ROLE_MASTER, _sessionId, _counter,
+                       millis(), _seq, 0, payload, sizeof(payload),
+                       packet, sizeof(packet), &packetLen)) {
+        sendError("encrypt", "detector control encode failed");
+        return;
+    }
+    esp_now_send(BROADCAST_MAC, packet, packetLen);
+}
+
+bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,
+                                           uint8_t channel,
+                                           uint16_t meshWindowMs,
+                                           uint16_t detectorWindowMs,
+                                           uint16_t hopDwellMs) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return false;
+
+    _detectorControlStart = start;
+    _detectorControlMode = mode;
+    _detectorControlChannel = channel;
+    _detectorControlMeshWindowMs = meshWindowMs;
+    _detectorControlDetectorWindowMs = detectorWindowMs;
+    _detectorControlHopDwellMs = hopDwellMs;
+    _detectorControlRetriesLeft = 5;
+    _detectorControlNextSendMs = 0;
+    _detectorControlPending = true;
+
+    sendDetectorControl(start, mode, channel, meshWindowMs, detectorWindowMs,
+                        hopDwellMs);
+    return true;
+}
+
+void MeshManager::sweepDetectorControl(uint32_t now) {
+    if (!_detectorControlPending) return;
+    if (_role != ROLE_MASTER || !_espNowActive || _sessionId == 0) {
+        _detectorControlPending = false;
+        return;
+    }
+    if (_detectorControlNextSendMs != 0 && now < _detectorControlNextSendMs) return;
+
+    sendDetectorControl(_detectorControlStart, _detectorControlMode,
+                        _detectorControlChannel, _detectorControlMeshWindowMs,
+                        _detectorControlDetectorWindowMs,
+                        _detectorControlHopDwellMs);
+    if (_detectorControlRetriesLeft > 0) _detectorControlRetriesLeft--;
+    if (_detectorControlRetriesLeft == 0) {
+        _detectorControlPending = false;
+        _detectorControlNextSendMs = 0;
+    } else {
+        _detectorControlNextSendMs = now + 700;
+    }
+}
+
+void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
+    if (!data || len < 9) return;
+    const bool start = data[0] != 0;
+    const uint8_t mode = data[1];
+    if (mode > 2) return;
+    const uint8_t channel = data[2];
+    if (channel < 1 || channel > 13) return;
+    const uint16_t meshWindowMs = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+    const uint16_t detectorWindowMs = (uint16_t)data[5] | ((uint16_t)data[6] << 8);
+    const uint16_t hopDwellMs = (uint16_t)data[7] | ((uint16_t)data[8] << 8);
+    if (detectorWindowMs < 300 || detectorWindowMs > 2500) return;
+    if (meshWindowMs < 2000 || meshWindowMs > 10000) return;
+    if (hopDwellMs < 200 || hopDwellMs > 1000) return;
+    if (_detectorControlCallback) {
+        _detectorControlCallback(start, mode, channel, meshWindowMs,
+                                 detectorWindowMs, hopDwellMs);
+    }
 }
 
 // ── USB event helpers ────────────────────────────────────────────────────────

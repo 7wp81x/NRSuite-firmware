@@ -37,14 +37,18 @@ bool DeauthDetector::start(const DeauthDetectConfig& config) {
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
     esp_wifi_set_promiscuous_filter(&filter);
     esp_wifi_set_promiscuous_rx_cb(&DeauthDetector::promiscuousCb);
-    esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+    if (!_externalRadio) {
+        esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+    }
     _active = true;
-    esp_wifi_set_promiscuous(true);
+    if (!_externalRadio) {
+        esp_wifi_set_promiscuous(true);
+    }
     return true;
 }
 
 void DeauthDetector::stop() {
-    if (_active) {
+    if (_active && !_externalRadio) {
         esp_wifi_set_promiscuous(false);
     }
     _active = false;
@@ -121,9 +125,9 @@ void DeauthDetector::handlePacket(wifi_promiscuous_pkt_t* pkt) {
 }
 
 void DeauthDetector::update() {
-    if (!_active || !_proto) return;
+    if (!_proto) return;
 
-    if (_hopMode && millis() - _lastHopMs >= _hopIntervalMs) {
+    if (!_externalRadio && _active && _hopMode && millis() - _lastHopMs >= _hopIntervalMs) {
         _lastHopMs = millis();
         _channel = (_channel % 13) + 1;
         esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
@@ -159,6 +163,10 @@ void DeauthDetector::update() {
 
         _proto->sendEvent("deauth_detected", ev);
         _stats.sent++;
+        if (_alertSink) {
+            _alertSink(alert.reason, alert.channel, alert.rssi,
+                       alert.source, alert.client);
+        }
     }
 }
 

@@ -32,6 +32,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 |---|---|---|
 | Rogue AP Detector | ✅ | Baseline SSID→BSSID/channel/security; flags mismatches, downgrades, duplicate SSIDs, KARMA-style probe-response behavior |
 | Deauth Detector | ✅ | Passive deauth/disassoc monitoring with BSSID/client/RSSI/reason filters, async alerts, and live logs |
+| Distributed Deauth Detector | 🟡 | Phase 3B mesh client time-slicing, encrypted deauth reports, master control/reporting; hardware validation pending |
 | Deauth Locator | 📋 | RSSI-based direction/distance estimate; multi-node triangulation |
 | Tracker Detector | ✅ | Android-side Find My-style detection using BLE Scanner raw payloads, repeated sightings, and alerts |
 | Client Detector | ✅ | Passive probe/assoc/reassoc/auth monitoring plus active deauth-trigger mode |
@@ -50,7 +51,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 | Activation Handshake | ✅ | Decrypt, auth, replay-counter, and 30 s USB auth window |
 | Session Locking | ✅ | Fresh master session ID; clients lock to it and recover after master reboot |
 | Heartbeat/Auto-Timeout | ✅ | 1 s master heartbeat, 5 s master timeout, 8 s peer timeout |
-| Distributed Sensor Reporting | 🟡 | Phase 3A `node_health` transport hardware-validated on S3 + S2; detector reports pending |
+| Distributed Sensor Reporting | 🟡 | Phase 3A `node_health` transport hardware-validated on S3 + S2; Phase 3B deauth reports/control implemented, hardware validation pending |
 | Triangulation Engine (app-side) | 📋 | Log-distance path-loss + trilateration from 3+ node RSSI reports |
 
 ## 4. Mesh Chat
