@@ -116,7 +116,7 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
     gDistLocalActive = true;
     gDistDetectorWindowActive = false;
     gDistNextSwitchMs = 0;
-    gDistHopChannel = (mode == DIST_MODE_HOP) ? 1 : channel;
+    gDistHopChannel = channel;
 
     if (mode == DIST_MODE_SAME_CHANNEL) {
         // Experimental single-channel coexistence mode.
@@ -223,7 +223,9 @@ static void updateDistributedDetectorScheduler() {
 
     if (!gDistDetectorWindowActive) {
         if (gDistNextSwitchMs == 0 || now >= gDistNextSwitchMs) {
-            const uint8_t firstChannel = (gDistMode == DIST_MODE_HOP) ? 1 : gDistChannel;
+            const uint8_t firstChannel = (gDistMode == DIST_MODE_HOP)
+                ? ((gDistChannel >= 1 && gDistChannel <= 13) ? gDistChannel : 1)
+                : gDistChannel;
             if (mesh.enterDetectorWindow(firstChannel, true)) {
                 gDistDetectorWindowActive = true;
                 gDistHopChannel = firstChannel;

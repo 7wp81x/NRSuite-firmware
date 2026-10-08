@@ -37,7 +37,7 @@ public:
     // channel and promiscuous mode. The detector still configures its packet
     // filter/callback and processes frames, but never touches the radio state.
     void setExternalRadio(bool external) { _externalRadio = external; }
-    void setChannelHint(uint8_t channel) { _channel = channel; }
+    void setChannelHint(uint8_t channel);
 
     bool start(const DeauthDetectConfig& config);
     void stop();

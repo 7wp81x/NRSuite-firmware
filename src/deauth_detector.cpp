@@ -47,6 +47,19 @@ bool DeauthDetector::start(const DeauthDetectConfig& config) {
     return true;
 }
 
+void DeauthDetector::setChannelHint(uint8_t channel) {
+    if (channel < 1 || channel > 14) return;
+    _channel = channel;
+    // In distributed mode the scheduler owns channel changes. Mirror them as
+    // normal hop events so a directly connected serial client can verify the
+    // detector window is actually hopping.
+    if (_externalRadio && _active && _hopMode && _proto) {
+        JsonDocument ev;
+        ev["channel"] = _channel;
+        _proto->sendEvent("deauth_detector_hop", ev);
+    }
+}
+
 void DeauthDetector::stop() {
     if (_active && !_externalRadio) {
         esp_wifi_set_promiscuous(false);
