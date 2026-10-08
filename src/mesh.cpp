@@ -531,6 +531,7 @@ void MeshManager::becomeMaster() {
 
 void MeshManager::adoptMaster(const PeerEntry& master) {
     const bool wasCandidate = (_role == ROLE_CANDIDATE);
+    const bool sessionChanged = (_role != ROLE_CLIENT) || (_sessionId != master.sessionId);
     _role = ROLE_CLIENT;
     _sessionId = master.sessionId;
     if (_scanChannel >= 1 && _scanChannel <= 13) {
@@ -544,14 +545,21 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     _lastMasterSeenMs = millis();
     _lastJoinMs = 0;
 
-    clearSensorQueue();
-    _lastHealthMs = 0;
-    _lastSensorSendMs = 0;
+    // A master heartbeat arrives every second. Do not reset report/health
+    // state on every heartbeat; only clear it when the session actually
+    // changes.
+    if (sessionChanged) {
+        clearSensorQueue();
+        _lastHealthMs = 0;
+        _lastSensorSendMs = 0;
+    }
 
     if (wasCandidate) {
         sendActivationResult(true, "joined existing master");
     }
-    sendStatusEvent("client");
+    if (sessionChanged) {
+        sendStatusEvent("client");
+    }
 }
 
 void MeshManager::demoteToClient(const PeerEntry& master) {
