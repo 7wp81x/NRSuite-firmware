@@ -108,6 +108,9 @@ void MeshManager::update() {
             esp_err_t err = esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE);
             if (err == ESP_OK) {
                 _scanChannel = next;
+                // Report the live recovery channel in MESH_STATUS. This is not
+                // persisted; successful adoption still stores the master channel.
+                _channel = next;
             }
             _lastScanHopMs = now;
         }
@@ -643,17 +646,27 @@ void MeshManager::becomeMaster() {
 void MeshManager::adoptMaster(const PeerEntry& master) {
     const bool wasCandidate = (_role == ROLE_CANDIDATE);
     const bool sessionChanged = (_role != ROLE_CLIENT) || (_sessionId != master.sessionId);
+    // A heartbeat can arrive on the old channel while a committed channel
+    // switch is still pending. Do not let that heartbeat cancel the pending
+    // switch; only a session change should clear it.
+    const bool switchPending = !sessionChanged &&
+        (_pendingChannel != 0 || _clientSwitchRequestTarget != 0);
+
     _role = ROLE_CLIENT;
     _sessionId = master.sessionId;
-    if (_scanChannel >= 1 && _scanChannel <= 13) {
+
+    if (!switchPending && _scanChannel >= 1 && _scanChannel <= 13) {
         _channel = _scanChannel;
         storeChannel();
     }
-    _pendingChannel = 0;
-    _switchAtMs = 0;
-    _clientHoldChannelUntilMs = 0;
-    _clientSwitchRequestTarget = 0;
-    _clientSwitchRequestDeadlineMs = 0;
+
+    if (!switchPending) {
+        _pendingChannel = 0;
+        _switchAtMs = 0;
+        _clientHoldChannelUntilMs = 0;
+        _clientSwitchRequestTarget = 0;
+        _clientSwitchRequestDeadlineMs = 0;
+    }
     _idleListenUntilMs = 0;
     _fastHeartbeatUntilMs = 0;
     _masterNodeHash = master.nodeHash;
