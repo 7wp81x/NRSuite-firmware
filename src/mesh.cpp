@@ -168,14 +168,15 @@ void MeshManager::update() {
     }
 
     if (_role == ROLE_CLIENT) {
-        if (!_joinAckReceived && _lastMasterSeenMs != 0 &&
-            now - _lastMasterSeenMs > JOIN_ACK_TIMEOUT_MS) {
+        if (!_joinAckReceived && _joinWaitStartedMs != 0 &&
+            now - _joinWaitStartedMs > JOIN_ACK_TIMEOUT_MS) {
             // The master heartbeat is audible but it never ACKed our JOIN.
             // Do not stay locked to a master that does not have us in its
             // peer table; resume discovery instead.
             _role = ROLE_IDLE;
             _sessionId = 0;
             _lastJoinMs = 0;
+            _joinWaitStartedMs = 0;
             _pendingChannel = 0;
             _switchAtMs = 0;
             _clientSwitchRequestTarget = 0;
@@ -279,6 +280,7 @@ void MeshManager::stop() {
     _lastJoinMs = 0;
     _joinAckReceived = false;
     _lastJoinAckMs = 0;
+    _joinWaitStartedMs = 0;
     _lastMasterSeenMs = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
@@ -629,6 +631,7 @@ bool MeshManager::activate() {
     _lastJoinMs = 0;
     _joinAckReceived = false;
     _lastJoinAckMs = 0;
+    _joinWaitStartedMs = 0;
     _lastMasterSeenMs = 0;
     _lastScanHopMs = millis();
     _scanChannel = _channel;
@@ -684,6 +687,9 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     if (sessionChanged) {
         _joinAckReceived = false;
         _lastJoinAckMs = 0;
+        _joinWaitStartedMs = millis();
+    } else if (!_joinAckReceived && _joinWaitStartedMs == 0) {
+        _joinWaitStartedMs = millis();
     }
 
     if (!switchPending && _scanChannel >= 1 && _scanChannel <= 13) {
@@ -972,6 +978,7 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
             }
             _joinAckReceived = true;
             _lastJoinAckMs = millis();
+            _joinWaitStartedMs = 0;
             _lastMasterSeenMs = millis();
             sendStatusEvent("join_acked");
         }
@@ -1758,13 +1765,12 @@ bool MeshManager::setChannel(uint8_t channel, bool persist) {
 
 uint8_t MeshManager::nextRecoveryChannel() {
     if (_scanChannel < 1 || _scanChannel > 13) {
-        _scanChannel = 1;
-    } else if (_scanChannel >= 13) {
-        _scanChannel = 1;
-    } else {
-        _scanChannel++;
+        return 1;
     }
-    return _scanChannel;
+    if (_scanChannel >= 13) {
+        return 1;
+    }
+    return (uint8_t)(_scanChannel + 1);
 }
 
 void MeshManager::clearChannelSwitchState() {

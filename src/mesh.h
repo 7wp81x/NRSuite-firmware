@@ -159,6 +159,7 @@ private:
     uint32_t _lastJoinMs = 0;
     bool     _joinAckReceived = false;
     uint32_t _lastJoinAckMs = 0;
+    uint32_t _joinWaitStartedMs = 0;
     uint32_t _lastMasterSeenMs = 0;
     uint32_t _lastAuthMs = 0;
     uint32_t _masterNodeHash = 0;
