@@ -277,6 +277,10 @@ void MeshManager::update() {
 
 void MeshManager::stop() {
     const bool wasActive = (_role != ROLE_DISABLED);
+    // Reload the persisted operator intent. A channel switch may have
+    // persisted the target before its commit completed, and stopping the
+    // radio must not leave the in-RAM channel pointing at the old value.
+    loadChannel();
     if (_detectorRadioActive) {
         esp_wifi_set_promiscuous(false);
         _detectorRadioActive = false;
