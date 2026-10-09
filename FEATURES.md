@@ -52,6 +52,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 | Session Locking | ✅ | Fresh master session ID; clients lock to it and recover after master reboot |
 | Heartbeat/Auto-Timeout | ✅ | 1 s master heartbeat, 5 s master timeout, 8 s peer timeout |
 | Channel Switch ACK Handshake | ✅ | Encrypted request/ACK/commit, master timeout fallback, client 60 s hold; hardware-validated on S3 + S2 |
+| Join ACK Handshake | 🟡 | Master ACKs accepted clients; clients only lock/persist a channel after JOIN_ACK, otherwise resume hopping; hardware validation pending |
 | Distributed Sensor Reporting | 🟡 | Phase 3A `node_health` transport hardware-validated on S3 + S2; Phase 3B deauth reports/control implemented, hardware validation pending |
 | Triangulation Engine (app-side) | 📋 | Log-distance path-loss + trilateration from 3+ node RSSI reports |
 

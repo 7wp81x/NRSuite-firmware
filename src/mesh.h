@@ -84,6 +84,7 @@ private:
     static const uint8_t  PKT_SENSOR_REPORT  = 5;
     static const uint8_t  PKT_DETECTOR_CONTROL = 6;
     static const uint8_t  PKT_CHANNEL_SWITCH_ACK = 7;
+    static const uint8_t  PKT_JOIN_ACK = 8;
 
     static const uint8_t  REPORT_KIND_NODE_HEALTH = 1;
     static const uint8_t  REPORT_KIND_DEAUTH      = 2;
@@ -118,6 +119,7 @@ private:
     static const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
     static const uint32_t MASTER_TIMEOUT_MS    = 5000;
     static const uint32_t JOIN_INTERVAL_MS     = 2000;
+    static const uint32_t JOIN_ACK_TIMEOUT_MS  = 6000;
     static const uint32_t PEER_TIMEOUT_MS      = 8000;
     static const uint32_t AUTH_WINDOW_MS       = 30000;
     static const uint32_t MIN_FREE_HEAP_BYTES  = 40000;
@@ -153,6 +155,8 @@ private:
     uint32_t _candidateSinceMs = 0;
     uint32_t _lastBroadcastMs = 0;
     uint32_t _lastJoinMs = 0;
+    bool     _joinAckReceived = false;
+    uint32_t _lastJoinAckMs = 0;
     uint32_t _lastMasterSeenMs = 0;
     uint32_t _lastAuthMs = 0;
     uint32_t _masterNodeHash = 0;
@@ -224,6 +228,7 @@ private:
     void demoteToClient(const PeerEntry& master);
     void sendHeartbeat();
     void sendJoin();
+    void sendJoinAck(uint32_t targetNodeHash);
 
     void handlePacket(const uint8_t* srcMac, const uint8_t* data, int len, int8_t rssi);
     bool decodePacket(const uint8_t* data, int len, uint8_t* type,

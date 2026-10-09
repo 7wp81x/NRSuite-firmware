@@ -168,6 +168,26 @@ void MeshManager::update() {
     }
 
     if (_role == ROLE_CLIENT) {
+        if (!_joinAckReceived && _lastMasterSeenMs != 0 &&
+            now - _lastMasterSeenMs > JOIN_ACK_TIMEOUT_MS) {
+            // The master heartbeat is audible but it never ACKed our JOIN.
+            // Do not stay locked to a master that does not have us in its
+            // peer table; resume discovery instead.
+            _role = ROLE_IDLE;
+            _sessionId = 0;
+            _lastJoinMs = 0;
+            _pendingChannel = 0;
+            _switchAtMs = 0;
+            _clientSwitchRequestTarget = 0;
+            _clientSwitchRequestDeadlineMs = 0;
+            _clientHoldChannelUntilMs = 0;
+            _scanChannel = _channel;
+            _lastScanHopMs = now;
+            _idleListenUntilMs = now + MESH_INITIAL_LISTEN_MS;
+            sendStatusEvent("join_timeout");
+            return;
+        }
+
         // If the commit packet was missed, fall back to switching after the
         // request ACK timeout. This keeps a client that heard the request from
         // being stranded on the old channel forever.
@@ -217,7 +237,8 @@ void MeshManager::update() {
         if (_lastJoinMs == 0 || now - _lastJoinMs >= JOIN_INTERVAL_MS) {
             sendJoin();
         }
-        if (_lastHealthMs == 0 || now - _lastHealthMs >= NODE_HEALTH_INTERVAL_MS) {
+        if (_joinAckReceived &&
+            (_lastHealthMs == 0 || now - _lastHealthMs >= NODE_HEALTH_INTERVAL_MS)) {
             _lastHealthMs = now;
             uint8_t health[MAX_SENSOR_DATA_LEN];
             const size_t healthLen = buildNodeHealthPayload(health, sizeof(health));
@@ -225,8 +246,9 @@ void MeshManager::update() {
                 enqueueSensorReport(REPORT_KIND_NODE_HEALTH, health, healthLen, true);
             }
         }
-        if (_lastSensorSendMs == 0 ||
-            now - _lastSensorSendMs >= SENSOR_SEND_INTERVAL_MS) {
+        if (_joinAckReceived &&
+            (_lastSensorSendMs == 0 ||
+             now - _lastSensorSendMs >= SENSOR_SEND_INTERVAL_MS)) {
             sendQueuedSensorReports(now);
         }
     }
@@ -255,6 +277,8 @@ void MeshManager::stop() {
     _counter = 0;
     _lastBroadcastMs = 0;
     _lastJoinMs = 0;
+    _joinAckReceived = false;
+    _lastJoinAckMs = 0;
     _lastMasterSeenMs = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
@@ -603,6 +627,8 @@ bool MeshManager::activate() {
     _seq = 0;
     _lastBroadcastMs = 0;
     _lastJoinMs = 0;
+    _joinAckReceived = false;
+    _lastJoinAckMs = 0;
     _lastMasterSeenMs = 0;
     _lastScanHopMs = millis();
     _scanChannel = _channel;
@@ -655,9 +681,17 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     _role = ROLE_CLIENT;
     _sessionId = master.sessionId;
 
+    if (sessionChanged) {
+        _joinAckReceived = false;
+        _lastJoinAckMs = 0;
+    }
+
     if (!switchPending && _scanChannel >= 1 && _scanChannel <= 13) {
         _channel = _scanChannel;
-        storeChannel();
+        // Only persist the channel once the master has ACKed our JOIN.
+        if (_joinAckReceived) {
+            storeChannel();
+        }
     }
 
     if (!switchPending) {
@@ -746,6 +780,7 @@ void MeshManager::sendHeartbeat() {
 
 void MeshManager::sendJoin() {
     if (_role != ROLE_CLIENT) return;
+    if (_joinAckReceived) return;
 
     _counter++;
     if (_counter == 0) _counter = 1;
@@ -763,6 +798,28 @@ void MeshManager::sendJoin() {
 
     esp_now_send(BROADCAST_MAC, packet, packetLen);
     _lastJoinMs = millis();
+}
+
+void MeshManager::sendJoinAck(uint32_t targetNodeHash) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+
+    uint8_t payload[5];
+    payload[0] = _channel;
+    writeU32(payload + 1, targetNodeHash);
+
+    _counter++;
+    if (_counter == 0) _counter = 1;
+    _seq++;
+
+    uint8_t packet[MAX_PACKET_LEN];
+    size_t packetLen = 0;
+    if (!encryptPacket(PKT_JOIN_ACK, ROLE_MASTER, _sessionId, _counter,
+                       millis(), _seq, 0, payload, sizeof(payload),
+                       packet, sizeof(packet), &packetLen)) {
+        sendError("encrypt", "join ack encode failed");
+        return;
+    }
+    esp_now_send(BROADCAST_MAC, packet, packetLen);
 }
 
 void MeshManager::espNowRecvCallback(const esp_now_recv_info_t* info,
@@ -846,6 +903,9 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
             sendNodeJoinedEvent(*peer, rssi);
             sendStatusEvent("node_joined");
         }
+        // Re-ACK every join so a client that missed an earlier ACK can lock
+        // its channel without waiting for the next join interval.
+        sendJoinAck(nodeHash);
         return;
     }
 
@@ -877,10 +937,44 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
         if (firstSeen) {
             sendNodeJoinedEvent(*peer, rssi);
             sendStatusEvent("node_joined");
+            // A client which reached us before its JOIN arrived can lock on
+            // this ACK; normally the JOIN path already ACKed it.
+            sendJoinAck(nodeHash);
         }
 
         const uint8_t kind = payloadData[0];
         sendSensorReportEvent(*peer, kind, payloadData + 1, payloadLen - 1, rssi, seq);
+        return;
+    }
+
+    if (type == PKT_JOIN_ACK) {
+        if (_role != ROLE_CLIENT || sessionId != _sessionId) return;
+        if (role != ROLE_MASTER) return;
+
+        bool firstSeen = false;
+        if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
+                                  chip, role, rssi, &firstSeen)) {
+            return;
+        }
+
+        if (payloadLen < 5) return;
+        const uint32_t targetNodeHash = readU32(payloadData + 1);
+        if (targetNodeHash != _nodeHash) return;
+
+        if (_pendingChannel == 0 && _clientSwitchRequestTarget == 0) {
+            const uint8_t reportedChannel = payloadData[0];
+            const uint8_t lockedChannel =
+                (_scanChannel >= 1 && _scanChannel <= 13) ? _scanChannel : reportedChannel;
+            if (lockedChannel >= 1 && lockedChannel <= 13) {
+                _channel = lockedChannel;
+                _scanChannel = lockedChannel;
+                storeChannel();
+            }
+            _joinAckReceived = true;
+            _lastJoinAckMs = millis();
+            _lastMasterSeenMs = millis();
+            sendStatusEvent("join_acked");
+        }
         return;
     }
 
@@ -931,7 +1025,8 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     const uint8_t ptype = data[1];
     if (ptype != PKT_HEARTBEAT && ptype != PKT_JOIN && ptype != PKT_LEAVE &&
         ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT &&
-        ptype != PKT_DETECTOR_CONTROL && ptype != PKT_CHANNEL_SWITCH_ACK) return false;
+        ptype != PKT_DETECTOR_CONTROL && ptype != PKT_CHANNEL_SWITCH_ACK &&
+        ptype != PKT_JOIN_ACK) return false;
 
     const uint32_t psession = readU32(data + 4);
     const uint32_t pcounter = readU32(data + 8);
