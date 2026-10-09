@@ -83,6 +83,7 @@ private:
     static const uint8_t  PKT_CHANNEL_SWITCH = 4;
     static const uint8_t  PKT_SENSOR_REPORT  = 5;
     static const uint8_t  PKT_DETECTOR_CONTROL = 6;
+    static const uint8_t  PKT_CHANNEL_SWITCH_ACK = 7;
 
     static const uint8_t  REPORT_KIND_NODE_HEALTH = 1;
     static const uint8_t  REPORT_KIND_DEAUTH      = 2;
@@ -110,6 +111,7 @@ private:
     };
 
     static const uint32_t ELECTION_WINDOW_MS   = 1200;
+    static const uint32_t CANDIDATE_DISCOVERY_TIMEOUT_MS = 7000;
     static const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
     static const uint32_t MASTER_TIMEOUT_MS    = 5000;
     static const uint32_t JOIN_INTERVAL_MS     = 2000;
@@ -118,7 +120,11 @@ private:
     static const uint32_t MIN_FREE_HEAP_BYTES  = 40000;
     static const uint32_t MESH_SCAN_DWELL_MS   = 500;
     static const uint32_t CHANNEL_SWITCH_DELAY_MS = 3000;
+    static const uint32_t CHANNEL_SWITCH_ACK_TIMEOUT_MS = 3000;
+    static const uint32_t CHANNEL_SWITCH_COMMIT_DELAY_MS = 500;
+    static const uint32_t CHANNEL_SWITCH_HOLD_MS = 60000;
     static const uint16_t CHANNEL_SWITCH_REPEAT_MS = 500;
+    static const uint16_t CHANNEL_SWITCH_COMMIT_REPEAT_MS = 400;
     static const uint32_t NODE_HEALTH_INTERVAL_MS = 5000;
     static const uint32_t SENSOR_SEND_INTERVAL_MS = 1000;
 
@@ -156,6 +162,15 @@ private:
     uint32_t _lastScanHopMs = 0;
     uint32_t _switchAtMs = 0;
     uint32_t _lastSwitchPacketMs = 0;
+    bool     _channelSwitchActive = false;
+    bool     _channelSwitchCommitSent = false;
+    uint8_t  _channelSwitchTarget = 0;
+    uint32_t _channelSwitchId = 0;
+    uint32_t _channelSwitchDeadlineMs = 0;
+    uint32_t _lastChannelSwitchTxMs = 0;
+    uint32_t _channelSwitchAckHashes[REPLAY_SLOTS] = {};
+    uint8_t  _channelSwitchAckCount = 0;
+    uint32_t _clientHoldChannelUntilMs = 0;
 
     PeerEntry _peers[REPLAY_SLOTS] = {};
 
@@ -183,8 +198,15 @@ private:
     bool setChannel(uint8_t channel, bool persist);
     uint8_t nextRecoveryChannel();
     void startChannelSwitch(uint8_t targetChannel);
-    void sendChannelSwitch();
-    void handleChannelSwitch(uint32_t encodedTarget);
+    void clearChannelSwitchState();
+    void sendChannelSwitchPacket(uint8_t phase);
+    void sendChannelSwitchAck(uint8_t targetChannel, uint32_t switchId);
+    bool channelSwitchAllAcked() const;
+    void markChannelSwitchAck(uint32_t nodeHash);
+    void handleChannelSwitchPacket(const uint8_t* data, size_t len);
+    void handleChannelSwitchAckPacket(const uint8_t* data, size_t len,
+                                      uint32_t nodeHash);
+    void sendChannelSwitchEvent(const char* phase, const char* reason = nullptr);
     bool clearKeys();
     bool startRadio();
     void stopRadio();

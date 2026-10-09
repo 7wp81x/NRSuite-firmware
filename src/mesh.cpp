@@ -72,7 +72,24 @@ void MeshManager::update() {
     if (_detectorWindowActive) return;
 
     if (_role == ROLE_CANDIDATE) {
-        if (now - _candidateSinceMs >= ELECTION_WINDOW_MS) {
+        // Before becoming a second master, search the configured channel and
+        // then the recovery channel list for an existing master.
+        if (_lastScanHopMs == 0 ||
+            now - _lastScanHopMs >= MESH_SCAN_DWELL_MS) {
+            const uint8_t next = nextRecoveryChannel();
+            const esp_err_t err = esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE);
+            if (err == ESP_OK) {
+                _scanChannel = next;
+            }
+            _lastScanHopMs = now;
+        }
+
+        if (now - _candidateSinceMs >= CANDIDATE_DISCOVERY_TIMEOUT_MS) {
+            // No master answered during a full discovery pass. Return to the
+            // configured channel and start normal master election there.
+            setChannel(_channel, false);
+            _scanChannel = _channel;
+            _lastScanHopMs = 0;
             becomeMaster();
         }
     }
@@ -89,17 +106,35 @@ void MeshManager::update() {
     }
 
     if (_role == ROLE_MASTER) {
-        if (_pendingChannel != 0) {
-            if (now >= _switchAtMs) {
-                setChannel(_pendingChannel, true);
-                _pendingChannel = 0;
-                _switchAtMs = 0;
-                _lastSwitchPacketMs = 0;
+        if (_channelSwitchActive) {
+            if (!_channelSwitchCommitSent) {
+                if (channelSwitchAllAcked()) {
+                    sendChannelSwitchPacket(2);
+                    sendChannelSwitchEvent("commit", "all_acked");
+                    _channelSwitchCommitSent = true;
+                    _switchAtMs = now + CHANNEL_SWITCH_COMMIT_DELAY_MS;
+                    _lastChannelSwitchTxMs = now;
+                } else if (now >= _channelSwitchDeadlineMs) {
+                    sendChannelSwitchPacket(2);
+                    sendChannelSwitchEvent("commit", "ack_timeout");
+                    _channelSwitchCommitSent = true;
+                    _switchAtMs = now + CHANNEL_SWITCH_COMMIT_DELAY_MS;
+                    _lastChannelSwitchTxMs = now;
+                } else if (_lastChannelSwitchTxMs == 0 ||
+                           now - _lastChannelSwitchTxMs >= CHANNEL_SWITCH_REPEAT_MS) {
+                    sendChannelSwitchPacket(1);
+                    _lastChannelSwitchTxMs = now;
+                }
+            } else if (now >= _switchAtMs) {
+                setChannel(_channelSwitchTarget, true);
+                _lastHealthMs = 0;
+                sendChannelSwitchEvent("committed");
+                sendStatusEvent("channel_switched");
+                clearChannelSwitchState();
                 sendHeartbeat();
-            } else if (_lastSwitchPacketMs == 0 ||
-                       now - _lastSwitchPacketMs >= CHANNEL_SWITCH_REPEAT_MS) {
-                sendChannelSwitch();
-                _lastSwitchPacketMs = now;
+            } else if (now - _lastChannelSwitchTxMs >= CHANNEL_SWITCH_COMMIT_REPEAT_MS) {
+                sendChannelSwitchPacket(2);
+                _lastChannelSwitchTxMs = now;
             }
         }
 
@@ -116,22 +151,32 @@ void MeshManager::update() {
 
     if (_role == ROLE_CLIENT) {
         if (_pendingChannel != 0 && now >= _switchAtMs) {
-            setChannel(_pendingChannel, true);
+            // Do not persist the candidate switch channel yet. It is saved
+            // only when a master heartbeat is successfully adopted again.
+            setChannel(_pendingChannel, false);
             _pendingChannel = 0;
             _switchAtMs = 0;
             _lastMasterSeenMs = now;
+            _lastHealthMs = 0;
+            _clientHoldChannelUntilMs = now + CHANNEL_SWITCH_HOLD_MS;
             sendStatusEvent("channel_switched");
         }
         if (_lastMasterSeenMs != 0 &&
             now - _lastMasterSeenMs > MASTER_TIMEOUT_MS) {
-            _role = ROLE_IDLE;
-            _sessionId = 0;
-            _lastJoinMs = 0;
-            _pendingChannel = 0;
-            _switchAtMs = 0;
-            _lastScanHopMs = 0;
-            sendStatusEvent("master_timeout");
-            return;
+            if (_clientHoldChannelUntilMs != 0 && now < _clientHoldChannelUntilMs) {
+                // Stay on the committed channel for the hold period and keep
+                // trying to reach the master. Do not start recovery hopping yet.
+            } else {
+                _clientHoldChannelUntilMs = 0;
+                _role = ROLE_IDLE;
+                _sessionId = 0;
+                _lastJoinMs = 0;
+                _pendingChannel = 0;
+                _switchAtMs = 0;
+                _lastScanHopMs = 0;
+                sendStatusEvent("master_timeout");
+                return;
+            }
         }
         if (_lastJoinMs == 0 || now - _lastJoinMs >= JOIN_INTERVAL_MS) {
             sendJoin();
@@ -177,9 +222,8 @@ void MeshManager::stop() {
     _lastMasterSeenMs = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
-    _pendingChannel = 0;
-    _switchAtMs = 0;
-    _lastSwitchPacketMs = 0;
+    clearChannelSwitchState();
+    _clientHoldChannelUntilMs = 0;
     clearSensorQueue();
     _lastHealthMs = 0;
     _lastSensorSendMs = 0;
@@ -510,6 +554,8 @@ bool MeshManager::activate() {
     _lastBroadcastMs = 0;
     _lastJoinMs = 0;
     _lastMasterSeenMs = 0;
+    _lastScanHopMs = millis();
+    _scanChannel = _channel;
     _masterNodeHash = 0;
     _masterBootId = 0;
     clearSensorQueue();
@@ -557,6 +603,7 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     }
     _pendingChannel = 0;
     _switchAtMs = 0;
+    _clientHoldChannelUntilMs = 0;
     _masterNodeHash = master.nodeHash;
     _masterBootId = master.bootId;
     _lastMasterSeenMs = millis();
@@ -790,7 +837,19 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
                                   chip, role, rssi, &firstSeen)) {
             return;
         }
-        handleChannelSwitch(electionTs);
+        handleChannelSwitchPacket(payloadData, payloadLen);
+        return;
+    }
+
+    if (type == PKT_CHANNEL_SWITCH_ACK) {
+        if (_role != ROLE_MASTER || sessionId != _sessionId) return;
+        if (role != ROLE_CLIENT) return;
+        bool firstSeen = false;
+        if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
+                                  chip, role, rssi, &firstSeen)) {
+            return;
+        }
+        handleChannelSwitchAckPacket(payloadData, payloadLen, nodeHash);
         return;
     }
 }
@@ -807,7 +866,7 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     const uint8_t ptype = data[1];
     if (ptype != PKT_HEARTBEAT && ptype != PKT_JOIN && ptype != PKT_LEAVE &&
         ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT &&
-        ptype != PKT_DETECTOR_CONTROL) return false;
+        ptype != PKT_DETECTOR_CONTROL && ptype != PKT_CHANNEL_SWITCH_ACK) return false;
 
     const uint32_t psession = readU32(data + 4);
     const uint32_t pcounter = readU32(data + 8);
@@ -1534,24 +1593,60 @@ uint8_t MeshManager::nextRecoveryChannel() {
     return _scanChannel;
 }
 
+void MeshManager::clearChannelSwitchState() {
+    _channelSwitchActive = false;
+    _channelSwitchCommitSent = false;
+    _channelSwitchTarget = 0;
+    _channelSwitchId = 0;
+    _channelSwitchDeadlineMs = 0;
+    _lastChannelSwitchTxMs = 0;
+    _channelSwitchAckCount = 0;
+    memset(_channelSwitchAckHashes, 0, sizeof(_channelSwitchAckHashes));
+    _pendingChannel = 0;
+    _switchAtMs = 0;
+    _lastSwitchPacketMs = 0;
+}
+
 void MeshManager::startChannelSwitch(uint8_t targetChannel) {
     if (targetChannel < 1 || targetChannel > 13) return;
     if (targetChannel == _channel) return;
+    if (_channelSwitchActive) return;
+
+    _channelSwitchActive = true;
+    _channelSwitchCommitSent = false;
+    _channelSwitchTarget = targetChannel;
+    _channelSwitchId = esp_random() ? esp_random() : 1;
+    _channelSwitchDeadlineMs = millis() + CHANNEL_SWITCH_ACK_TIMEOUT_MS;
+    _lastChannelSwitchTxMs = 0;
+    _channelSwitchAckCount = 0;
+    memset(_channelSwitchAckHashes, 0, sizeof(_channelSwitchAckHashes));
     _pendingChannel = targetChannel;
-    _switchAtMs = millis() + CHANNEL_SWITCH_DELAY_MS;
+    _switchAtMs = 0;
     _lastSwitchPacketMs = 0;
+
     sendStatusEvent("channel_switch_pending");
-    sendChannelSwitch();
+    sendChannelSwitchPacket(1);
+    sendChannelSwitchEvent("request");
+    _lastChannelSwitchTxMs = millis();
 }
 
-void MeshManager::sendChannelSwitch() {
-    if (_pendingChannel == 0 || _sessionId == 0) return;
+void MeshManager::sendChannelSwitchPacket(uint8_t phase) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+    if (_channelSwitchTarget < 1 || _channelSwitchTarget > 13) return;
+
+    uint8_t payload[6];
+    payload[0] = phase;
+    payload[1] = _channelSwitchTarget;
+    writeU32(payload + 2, _channelSwitchId);
+
     _counter++;
     if (_counter == 0) _counter = 1;
+    _seq++;
+
     uint8_t packet[MAX_PACKET_LEN];
     size_t packetLen = 0;
     if (!encryptPacket(PKT_CHANNEL_SWITCH, ROLE_MASTER, _sessionId, _counter,
-                       millis(), _seq, _pendingChannel, nullptr, 0,
+                       millis(), _seq, 0, payload, sizeof(payload),
                        packet, sizeof(packet), &packetLen)) {
         sendError("encrypt", "channel switch encode failed");
         return;
@@ -1559,14 +1654,129 @@ void MeshManager::sendChannelSwitch() {
     esp_now_send(BROADCAST_MAC, packet, packetLen);
 }
 
-void MeshManager::handleChannelSwitch(uint32_t encodedTarget) {
-    const uint8_t targetChannel = (uint8_t)(encodedTarget & 0xFF);
+void MeshManager::sendChannelSwitchAck(uint8_t targetChannel, uint32_t switchId) {
+    if (!_espNowActive || _role != ROLE_CLIENT || _sessionId == 0) return;
     if (targetChannel < 1 || targetChannel > 13) return;
+
+    uint8_t payload[5];
+    payload[0] = targetChannel;
+    writeU32(payload + 1, switchId);
+
+    _counter++;
+    if (_counter == 0) _counter = 1;
+    _seq++;
+
+    uint8_t packet[MAX_PACKET_LEN];
+    size_t packetLen = 0;
+    if (!encryptPacket(PKT_CHANNEL_SWITCH_ACK, ROLE_CLIENT, _sessionId, _counter,
+                       millis(), _seq, 0, payload, sizeof(payload),
+                       packet, sizeof(packet), &packetLen)) {
+        sendError("encrypt", "channel switch ack encode failed");
+        return;
+    }
+    esp_now_send(BROADCAST_MAC, packet, packetLen);
+}
+
+bool MeshManager::channelSwitchAllAcked() const {
+    const uint32_t now = millis();
+    for (size_t i = 0; i < REPLAY_SLOTS; i++) {
+        const PeerEntry& peer = _peers[i];
+        if (!peer.used || peer.role != ROLE_CLIENT) continue;
+        if (now - peer.lastSeenMs > PEER_TIMEOUT_MS) continue;
+        bool acked = false;
+        for (size_t j = 0; j < _channelSwitchAckCount; j++) {
+            if (_channelSwitchAckHashes[j] == peer.nodeHash) {
+                acked = true;
+                break;
+            }
+        }
+        if (!acked) return false;
+    }
+    return true;
+}
+
+void MeshManager::markChannelSwitchAck(uint32_t nodeHash) {
+    for (size_t i = 0; i < _channelSwitchAckCount; i++) {
+        if (_channelSwitchAckHashes[i] == nodeHash) return;
+    }
+    if (_channelSwitchAckCount < REPLAY_SLOTS) {
+        _channelSwitchAckHashes[_channelSwitchAckCount++] = nodeHash;
+    }
+    sendChannelSwitchEvent("ack");
+}
+
+void MeshManager::handleChannelSwitchPacket(const uint8_t* data, size_t len) {
+    if (!data || len < 6) return;
     if (_role != ROLE_CLIENT) return;
-    if (_pendingChannel != 0) return;
-    _pendingChannel = targetChannel;
-    _switchAtMs = millis() + CHANNEL_SWITCH_DELAY_MS;
-    sendStatusEvent("channel_switch_pending");
+
+    const uint8_t phase = data[0];
+    const uint8_t targetChannel = data[1];
+    const uint32_t switchId = readU32(data + 2);
+    if (targetChannel < 1 || targetChannel > 13) return;
+
+    if (phase == 1) {
+        // Master request: acknowledge and wait for the commit.
+        sendChannelSwitchAck(targetChannel, switchId);
+        sendStatusEvent("channel_switch_ack_sent");
+        return;
+    }
+
+    if (phase == 2) {
+        // Master commit: switch shortly, then hold on the target channel.
+        _channelSwitchId = switchId;
+        _pendingChannel = targetChannel;
+        _switchAtMs = millis() + CHANNEL_SWITCH_COMMIT_DELAY_MS;
+        _clientHoldChannelUntilMs = millis() + CHANNEL_SWITCH_HOLD_MS;
+        sendStatusEvent("channel_switch_commit");
+    }
+}
+
+void MeshManager::handleChannelSwitchAckPacket(const uint8_t* data, size_t len,
+                                               uint32_t nodeHash) {
+    if (!data || len < 5) return;
+    if (!_channelSwitchActive) return;
+    const uint8_t targetChannel = data[0];
+    const uint32_t switchId = readU32(data + 1);
+    if (targetChannel != _channelSwitchTarget || switchId != _channelSwitchId) {
+        return;
+    }
+    markChannelSwitchAck(nodeHash);
+}
+
+void MeshManager::sendChannelSwitchEvent(const char* phase, const char* reason) {
+    if (!_proto || !phase) return;
+
+    JsonDocument doc;
+    doc["phase"] = phase;
+    doc["channel"] = _channelSwitchTarget;
+    doc["switch_id"] = _channelSwitchId;
+
+    JsonArray acked = doc["acked"].to<JsonArray>();
+    JsonArray pending = doc["pending"].to<JsonArray>();
+    const uint32_t now = millis();
+    for (size_t i = 0; i < REPLAY_SLOTS; i++) {
+        const PeerEntry& peer = _peers[i];
+        if (!peer.used || peer.role != ROLE_CLIENT) continue;
+        if (now - peer.lastSeenMs > PEER_TIMEOUT_MS) continue;
+
+        bool isAcked = false;
+        for (size_t j = 0; j < _channelSwitchAckCount; j++) {
+            if (_channelSwitchAckHashes[j] == peer.nodeHash) {
+                isAcked = true;
+                break;
+            }
+        }
+        if (isAcked) {
+            acked.add(peer.nodeId);
+        } else {
+            pending.add(peer.nodeId);
+        }
+    }
+
+    doc["acked_count"] = (uint32_t)acked.size();
+    doc["pending_count"] = (uint32_t)pending.size();
+    if (reason) doc["reason"] = reason;
+    _proto->sendEvent("mesh_channel_switch", doc);
 }
 
 // ── Utility helpers ──────────────────────────────────────────────────────────
