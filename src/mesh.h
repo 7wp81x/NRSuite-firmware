@@ -48,6 +48,8 @@ public:
     void exitDetectorWindow();
     bool detectorWindowActive() const { return _detectorRadioActive; }
     uint8_t currentChannel() const { return _channel; }
+    // Authoritative radio channel currently set in the Wi-Fi driver.
+    uint8_t radioChannel() const;
     bool enqueueDeauthReport(uint16_t reason, uint8_t channel, int8_t rssi,
                              const uint8_t* source, const uint8_t* target);
 
@@ -182,6 +184,7 @@ private:
     uint32_t _lastChannelSwitchTxMs = 0;
     uint32_t _channelSwitchAckHashes[REPLAY_SLOTS] = {};
     uint8_t  _channelSwitchAckCount = 0;
+    uint8_t  _channelSwitchSetAttempts = 0;
     uint32_t _clientHoldChannelUntilMs = 0;
     uint8_t  _clientSwitchRequestTarget = 0;
     uint32_t _clientSwitchRequestDeadlineMs = 0;
@@ -210,9 +213,11 @@ private:
     bool storeKeys();
     bool loadChannel();
     bool storeChannel();
+    bool storeChannelValue(uint8_t channel);
+    bool applyRadioChannel(uint8_t channel, const char* source);
     bool setChannel(uint8_t channel, bool persist);
     uint8_t nextRecoveryChannel();
-    void startChannelSwitch(uint8_t targetChannel);
+    bool startChannelSwitch(uint8_t targetChannel);
     void clearChannelSwitchState();
     void sendChannelSwitchPacket(uint8_t phase);
     void sendChannelSwitchAck(uint8_t targetChannel, uint32_t switchId);

@@ -80,8 +80,7 @@ void MeshManager::update() {
         if (_lastScanHopMs == 0 ||
             now - _lastScanHopMs >= MESH_SCAN_DWELL_MS) {
             const uint8_t next = nextRecoveryChannel();
-            const esp_err_t err = esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE);
-            if (err == ESP_OK) {
+            if (applyRadioChannel(next, "candidate_scan")) {
                 _scanChannel = next;
             }
             _lastScanHopMs = now;
@@ -105,12 +104,12 @@ void MeshManager::update() {
         } else if (_lastScanHopMs == 0 || now - _lastScanHopMs >= MESH_SCAN_DWELL_MS) {
             _idleListenUntilMs = 0;
             const uint8_t next = nextRecoveryChannel();
-            esp_err_t err = esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE);
-            if (err == ESP_OK) {
+            if (applyRadioChannel(next, "idle_scan")) {
+                // Keep _channel as the configured/adopted mesh channel. The
+                // live recovery channel is exposed separately as scan_channel
+                // and radio_channel so MESH_ACTIVATE cannot start the node on
+                // a transient scan channel.
                 _scanChannel = next;
-                // Report the live recovery channel in MESH_STATUS. This is not
-                // persisted; successful adoption still stores the master channel.
-                _channel = next;
             }
             _lastScanHopMs = now;
         }
@@ -137,13 +136,27 @@ void MeshManager::update() {
                     _lastChannelSwitchTxMs = now;
                 }
             } else if (now >= _switchAtMs) {
-                setChannel(_channelSwitchTarget, true);
-                _lastHealthMs = 0;
-                _fastHeartbeatUntilMs = now + FAST_HEARTBEAT_WINDOW_MS;
-                sendChannelSwitchEvent("committed");
-                sendStatusEvent("channel_switched");
-                clearChannelSwitchState();
-                sendHeartbeat();
+                if (!setChannel(_channelSwitchTarget, true)) {
+                    // The target radio channel was rejected by the driver.
+                    // Keep the durable intent in NVS and retry briefly before
+                    // telling the app the switch failed.
+                    _channelSwitchSetAttempts++;
+                    if (_channelSwitchSetAttempts >= 3) {
+                        sendChannelSwitchEvent("failed", "set_channel_failed");
+                        sendStatusEvent("channel_switch_failed");
+                        clearChannelSwitchState();
+                    } else {
+                        _switchAtMs = now + 1000;
+                        sendChannelSwitchEvent("retry", "set_channel_failed");
+                    }
+                } else {
+                    _lastHealthMs = 0;
+                    _fastHeartbeatUntilMs = now + FAST_HEARTBEAT_WINDOW_MS;
+                    sendChannelSwitchEvent("committed");
+                    sendStatusEvent("channel_switched");
+                    clearChannelSwitchState();
+                    sendHeartbeat();
+                }
             } else if (now - _lastChannelSwitchTxMs >= CHANNEL_SWITCH_COMMIT_REPEAT_MS) {
                 sendChannelSwitchPacket(2);
                 _lastChannelSwitchTxMs = now;
@@ -388,23 +401,19 @@ bool MeshManager::startRadio() {
     if (_espNowActive) return true;
 
     esp_wifi_start();
-    esp_err_t err = esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
-    if (err != ESP_OK) {
+    if (!applyRadioChannel(_channel, "start_radio")) {
         // A persisted channel may be regulatory-unavailable on this build
         // (commonly 12-13). Fall back to a safe channel instead of leaving
         // the node permanently disabled.
-        sendError("channel", esp_err_to_name(err));
         _channel = 1;
         _scanChannel = 1;
-        err = esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
-        if (err != ESP_OK) {
-            sendError("channel", esp_err_to_name(err));
+        if (!applyRadioChannel(_channel, "start_radio_fallback")) {
             return false;
         }
         storeChannel();
     }
 
-    err = esp_now_init();
+    esp_err_t err = esp_now_init();
     if (err != ESP_OK) {
         sendError("espnow_init", esp_err_to_name(err));
         return false;
@@ -591,8 +600,25 @@ void MeshManager::handleCommand(uint8_t id, JsonDocument& doc) {
         }
 
         if (_role == ROLE_MASTER && _espNowActive) {
-            startChannelSwitch(channel);
-            sendResp(id, true, "channel switch initiated");
+            if (channel == _channel) {
+                sendResp(id, true, "already on channel");
+                return;
+            }
+            if (startChannelSwitch(channel)) {
+                sendResp(id, true, "channel switch initiated");
+            } else {
+                sendResp(id, false, "could not start channel switch");
+            }
+        } else if (_role == ROLE_CLIENT && _espNowActive) {
+            // A connected client must follow the master's actual channel.
+            // Persist the requested channel for the next activation instead
+            // of hopping away from the current session immediately.
+            if (storeChannelValue(channel)) {
+                sendStatusEvent("channel_saved_pending");
+                sendResp(id, true, "channel saved for next activation");
+            } else {
+                sendResp(id, false, "nvs write failed");
+            }
         } else {
             setChannel(channel, true);
             sendStatusEvent("channel_saved");
@@ -692,11 +718,18 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
         _joinWaitStartedMs = millis();
     }
 
-    if (!switchPending && _scanChannel >= 1 && _scanChannel <= 13) {
-        _channel = _scanChannel;
-        // Only persist the channel once the master has ACKed our JOIN.
-        if (_joinAckReceived) {
-            storeChannel();
+    if (!switchPending) {
+        const uint8_t actualChannel = radioChannel();
+        const uint8_t adoptedChannel =
+            (actualChannel >= 1 && actualChannel <= 13) ? actualChannel :
+            ((_scanChannel >= 1 && _scanChannel <= 13) ? _scanChannel : _channel);
+        if (adoptedChannel >= 1 && adoptedChannel <= 13) {
+            _channel = adoptedChannel;
+            _scanChannel = adoptedChannel;
+            // Only persist the channel once the master has ACKed our JOIN.
+            if (_joinAckReceived) {
+                storeChannel();
+            }
         }
     }
 
@@ -810,7 +843,7 @@ void MeshManager::sendJoinAck(uint32_t targetNodeHash) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
 
     uint8_t payload[5];
-    payload[0] = _channel;
+    payload[0] = radioChannel();
     writeU32(payload + 1, targetNodeHash);
 
     _counter++;
@@ -969,8 +1002,10 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
 
         if (_pendingChannel == 0 && _clientSwitchRequestTarget == 0) {
             const uint8_t reportedChannel = payloadData[0];
+            const uint8_t actualChannel = radioChannel();
             const uint8_t lockedChannel =
-                (_scanChannel >= 1 && _scanChannel <= 13) ? _scanChannel : reportedChannel;
+                (actualChannel >= 1 && actualChannel <= 13) ? actualChannel :
+                ((_scanChannel >= 1 && _scanChannel <= 13) ? _scanChannel : reportedChannel);
             if (lockedChannel >= 1 && lockedChannel <= 13) {
                 _channel = lockedChannel;
                 _scanChannel = lockedChannel;
@@ -1375,7 +1410,7 @@ size_t MeshManager::buildNodeHealthPayload(uint8_t* out, size_t outCap) const {
     if (!out || outCap < 10) return 0;
     writeU32(out, millis());
     writeU32(out + 4, (uint32_t)ESP.getFreeHeap());
-    out[8] = _channel;
+    out[8] = radioChannel();
     out[9] = _role;
     return 10;
 }
@@ -1423,6 +1458,7 @@ void MeshManager::sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
     doc["seq"] = seq;
     doc["rssi"] = rssi;
     doc["channel"] = _channel;
+    doc["radio_channel"] = radioChannel();
 
     if (kind == REPORT_KIND_NODE_HEALTH && len >= 10) {
         doc["uptime_ms"] = readU32(data);
@@ -1494,8 +1530,7 @@ bool MeshManager::enterDetectorWindow(uint8_t channel, bool pauseMesh) {
 
     _detectorWindowActive = pauseMesh;
     _detectorRadioActive = true;
-    const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    if (err != ESP_OK) {
+    if (!applyRadioChannel(channel, "detector_window_enter")) {
         _detectorWindowActive = false;
         _detectorRadioActive = false;
         return false;
@@ -1507,7 +1542,7 @@ bool MeshManager::enterDetectorWindow(uint8_t channel, bool pauseMesh) {
 bool MeshManager::setDetectorWindowChannel(uint8_t channel) {
     if (!_espNowActive || !_detectorWindowActive) return false;
     if (channel < 1 || channel > 13) return false;
-    return esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) == ESP_OK;
+    return applyRadioChannel(channel, "detector_window_hop");
 }
 
 void MeshManager::exitDetectorWindow() {
@@ -1515,7 +1550,7 @@ void MeshManager::exitDetectorWindow() {
     _detectorRadioActive = false;
     esp_wifi_set_promiscuous(false);
     if (_espNowActive) {
-        esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+        applyRadioChannel(_channel, "detector_window_exit");
     }
 }
 
@@ -1663,6 +1698,8 @@ void MeshManager::sendHeartbeatEvent(const PeerEntry& peer, int8_t rssi,
     doc["role"] = peerRole;
     doc["session_id"] = peer.sessionId;
     doc["channel"] = _channel;
+    doc["radio_channel"] = radioChannel();
+    doc["scan_channel"] = _scanChannel;
     doc["uptime_ms"] = uptimeMs;
     doc["seq"] = seq;
     doc["rssi"] = rssi;
@@ -1676,6 +1713,7 @@ void MeshManager::sendNodeJoinedEvent(const PeerEntry& peer, int8_t rssi) {
     if (peer.chip[0]) doc["chip"] = peer.chip;
     doc["session_id"] = _sessionId;
     doc["channel"] = _channel;
+    doc["radio_channel"] = radioChannel();
     doc["rssi"] = rssi;
     _proto->sendEvent("mesh_node_joined", doc);
 }
@@ -1690,11 +1728,27 @@ void MeshManager::sendNodeLeftEvent(const PeerEntry& peer, const char* reason) {
 }
 
 void MeshManager::appendStatusJson(JsonDocument& doc) const {
+    const uint32_t now = millis();
     doc["initialized"] = _initialized;
     doc["role"] = roleName();
     if (_sessionId != 0) doc["session_id"] = _sessionId;
     doc["node_id"] = _nodeId;
     doc["channel"] = _channel;
+    doc["radio_channel"] = radioChannel();
+    doc["scan_channel"] = _scanChannel;
+    doc["join_ack_received"] = _joinAckReceived;
+    doc["join_wait_ms"] = (_joinWaitStartedMs == 0) ? 0 : (now - _joinWaitStartedMs);
+    doc["last_master_seen_ms"] = (_lastMasterSeenMs == 0) ? 0 : (now - _lastMasterSeenMs);
+    doc["channel_switch_active"] = _channelSwitchActive;
+    if (_channelSwitchActive) {
+        doc["channel_switch_target"] = _channelSwitchTarget;
+        doc["channel_switch_id"] = _channelSwitchId;
+    }
+    if (_pendingChannel != 0) doc["pending_channel"] = _pendingChannel;
+    if (_clientHoldChannelUntilMs != 0) {
+        doc["client_hold_remaining_ms"] =
+            (now < _clientHoldChannelUntilMs) ? (_clientHoldChannelUntilMs - now) : 0;
+    }
     doc["peer_count"] = peerCount();
     doc["active"] = active();
 
@@ -1702,7 +1756,6 @@ void MeshManager::appendStatusJson(JsonDocument& doc) const {
     // after a clear/refresh, since mesh_node_joined is only emitted once per
     // online transition.
     JsonArray peers = doc["peers"].to<JsonArray>();
-    const uint32_t now = millis();
     for (size_t i = 0; i < REPLAY_SLOTS; i++) {
         const PeerEntry& peer = _peers[i];
         if (!peer.used || peer.role == OFFLINE_ROLE) continue;
@@ -1733,12 +1786,40 @@ bool MeshManager::loadChannel() {
     return true;
 }
 
-bool MeshManager::storeChannel() {
+bool MeshManager::storeChannelValue(uint8_t channel) {
+    if (channel < 1 || channel > 13) return false;
     Preferences prefs;
     if (!prefs.begin("mesh", false)) return false;
-    const size_t written = prefs.putUChar("mesh_channel", _channel);
+    const size_t written = prefs.putUChar("mesh_channel", channel);
     prefs.end();
     return written == 1;
+}
+
+bool MeshManager::storeChannel() {
+    return storeChannelValue(_channel);
+}
+
+uint8_t MeshManager::radioChannel() const {
+    uint8_t primary = _channel;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    const esp_err_t err = esp_wifi_get_channel(&primary, &second);
+    if (err == ESP_OK && primary >= 1 && primary <= 13) {
+        return primary;
+    }
+    return _channel;
+}
+
+bool MeshManager::applyRadioChannel(uint8_t channel, const char* source) {
+    if (channel < 1 || channel > 13) return false;
+    const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s: %s",
+                 source ? source : "set_channel", esp_err_to_name(err));
+        sendError("channel_set", msg);
+        return false;
+    }
+    return true;
 }
 
 bool MeshManager::setChannel(uint8_t channel, bool persist) {
@@ -1746,11 +1827,20 @@ bool MeshManager::setChannel(uint8_t channel, bool persist) {
 
     const uint8_t previousChannel = _channel;
     if (_espNowActive) {
-        const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-        if (err != ESP_OK) {
-            sendError("channel", esp_err_to_name(err));
+        if (!applyRadioChannel(channel, "set_channel")) {
             _channel = previousChannel;
             _scanChannel = previousChannel;
+            return false;
+        }
+        const uint8_t actualChannel = radioChannel();
+        if (actualChannel != channel) {
+            char msg[64];
+            snprintf(msg, sizeof(msg),
+                     "set_channel: driver reports channel %u, requested %u",
+                     (unsigned)actualChannel, (unsigned)channel);
+            sendError("channel_mismatch", msg);
+            _channel = actualChannel;
+            _scanChannel = actualChannel;
             return false;
         }
     }
@@ -1758,7 +1848,7 @@ bool MeshManager::setChannel(uint8_t channel, bool persist) {
     _channel = channel;
     _scanChannel = channel;
     if (persist) {
-        storeChannel();
+        storeChannelValue(channel);
     }
     return true;
 }
@@ -1781,16 +1871,25 @@ void MeshManager::clearChannelSwitchState() {
     _channelSwitchDeadlineMs = 0;
     _lastChannelSwitchTxMs = 0;
     _channelSwitchAckCount = 0;
+    _channelSwitchSetAttempts = 0;
     memset(_channelSwitchAckHashes, 0, sizeof(_channelSwitchAckHashes));
     _pendingChannel = 0;
     _switchAtMs = 0;
     _lastSwitchPacketMs = 0;
 }
 
-void MeshManager::startChannelSwitch(uint8_t targetChannel) {
-    if (targetChannel < 1 || targetChannel > 13) return;
-    if (targetChannel == _channel) return;
-    if (_channelSwitchActive) return;
+bool MeshManager::startChannelSwitch(uint8_t targetChannel) {
+    if (targetChannel < 1 || targetChannel > 13) return false;
+    if (targetChannel == _channel) return false;
+    if (_channelSwitchActive) return false;
+
+    // Persist the operator's intent before the multi-step handshake begins.
+    // If the master is stopped or unplugged mid-switch, the next boot still
+    // returns to the selected channel instead of the previous one.
+    if (!storeChannelValue(targetChannel)) {
+        sendError("channel_nvs", "could not persist target channel");
+        return false;
+    }
 
     _channelSwitchActive = true;
     _channelSwitchCommitSent = false;
@@ -1799,6 +1898,7 @@ void MeshManager::startChannelSwitch(uint8_t targetChannel) {
     _channelSwitchDeadlineMs = millis() + CHANNEL_SWITCH_ACK_TIMEOUT_MS;
     _lastChannelSwitchTxMs = 0;
     _channelSwitchAckCount = 0;
+    _channelSwitchSetAttempts = 0;
     memset(_channelSwitchAckHashes, 0, sizeof(_channelSwitchAckHashes));
     _pendingChannel = targetChannel;
     _switchAtMs = 0;
@@ -1808,6 +1908,7 @@ void MeshManager::startChannelSwitch(uint8_t targetChannel) {
     sendChannelSwitchPacket(1);
     sendChannelSwitchEvent("request");
     _lastChannelSwitchTxMs = millis();
+    return true;
 }
 
 void MeshManager::sendChannelSwitchPacket(uint8_t phase) {
@@ -1936,6 +2037,8 @@ void MeshManager::sendChannelSwitchEvent(const char* phase, const char* reason) 
     JsonDocument doc;
     doc["phase"] = phase;
     doc["channel"] = _channelSwitchTarget;
+    doc["target_channel"] = _channelSwitchTarget;
+    doc["radio_channel"] = radioChannel();
     doc["switch_id"] = _channelSwitchId;
 
     JsonArray acked = doc["acked"].to<JsonArray>();
