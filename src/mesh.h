@@ -111,14 +111,17 @@ private:
     };
 
     static const uint32_t ELECTION_WINDOW_MS   = 1200;
-    static const uint32_t CANDIDATE_DISCOVERY_TIMEOUT_MS = 7000;
+    static const uint32_t CANDIDATE_DISCOVERY_TIMEOUT_MS = 5000;
+    static const uint32_t MESH_INITIAL_LISTEN_MS = 1500;
+    static const uint32_t FAST_HEARTBEAT_INTERVAL_MS = 250;
+    static const uint32_t FAST_HEARTBEAT_WINDOW_MS = 3000;
     static const uint32_t HEARTBEAT_INTERVAL_MS = 1000;
     static const uint32_t MASTER_TIMEOUT_MS    = 5000;
     static const uint32_t JOIN_INTERVAL_MS     = 2000;
     static const uint32_t PEER_TIMEOUT_MS      = 8000;
     static const uint32_t AUTH_WINDOW_MS       = 30000;
     static const uint32_t MIN_FREE_HEAP_BYTES  = 40000;
-    static const uint32_t MESH_SCAN_DWELL_MS   = 500;
+    static const uint32_t MESH_SCAN_DWELL_MS   = 300;
     static const uint32_t CHANNEL_SWITCH_DELAY_MS = 3000;
     static const uint32_t CHANNEL_SWITCH_ACK_TIMEOUT_MS = 3000;
     static const uint32_t CHANNEL_SWITCH_COMMIT_DELAY_MS = 500;
@@ -160,6 +163,8 @@ private:
     uint8_t  _scanChannel = 1;
     uint8_t  _pendingChannel = 0;
     uint32_t _lastScanHopMs = 0;
+    uint32_t _idleListenUntilMs = 0;
+    uint32_t _fastHeartbeatUntilMs = 0;
     uint32_t _switchAtMs = 0;
     uint32_t _lastSwitchPacketMs = 0;
     bool     _channelSwitchActive = false;

@@ -53,6 +53,9 @@ void MeshManager::begin(BridgeProtocol& proto, const char* nodeId, const char* c
     if (_initialized && ESP.getFreeHeap() >= MIN_FREE_HEAP_BYTES) {
         if (startRadio()) {
             _role = ROLE_IDLE;
+            _scanChannel = _channel;
+            _lastScanHopMs = millis();
+            _idleListenUntilMs = millis() + MESH_INITIAL_LISTEN_MS;
         }
     }
 }
@@ -95,7 +98,12 @@ void MeshManager::update() {
     }
 
     if (_role == ROLE_IDLE && _initialized && _espNowActive) {
-        if (_lastScanHopMs == 0 || now - _lastScanHopMs >= MESH_SCAN_DWELL_MS) {
+        const bool initialListen = (_idleListenUntilMs != 0 && now < _idleListenUntilMs);
+        if (initialListen) {
+            // Stay on the last known channel long enough to catch at least one
+            // master heartbeat before starting a full recovery sweep.
+        } else if (_lastScanHopMs == 0 || now - _lastScanHopMs >= MESH_SCAN_DWELL_MS) {
+            _idleListenUntilMs = 0;
             const uint8_t next = nextRecoveryChannel();
             esp_err_t err = esp_wifi_set_channel(next, WIFI_SECOND_CHAN_NONE);
             if (err == ESP_OK) {
@@ -138,9 +146,15 @@ void MeshManager::update() {
             }
         }
 
+        const bool fastHeartbeat =
+            _fastHeartbeatUntilMs != 0 && now < _fastHeartbeatUntilMs;
         if (_lastBroadcastMs == 0 ||
-            now - _lastBroadcastMs >= HEARTBEAT_INTERVAL_MS) {
+            now - _lastBroadcastMs >=
+                (fastHeartbeat ? FAST_HEARTBEAT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS)) {
             sendHeartbeat();
+        }
+        if (_fastHeartbeatUntilMs != 0 && now >= _fastHeartbeatUntilMs) {
+            _fastHeartbeatUntilMs = 0;
         }
         if (_lastPeerSweepMs == 0 ||
             now - _lastPeerSweepMs >= 1000) {
@@ -173,7 +187,9 @@ void MeshManager::update() {
                 _lastJoinMs = 0;
                 _pendingChannel = 0;
                 _switchAtMs = 0;
-                _lastScanHopMs = 0;
+                _scanChannel = _channel;
+                _lastScanHopMs = now;
+                _idleListenUntilMs = now + MESH_INITIAL_LISTEN_MS;
                 sendStatusEvent("master_timeout");
                 return;
             }
@@ -222,6 +238,8 @@ void MeshManager::stop() {
     _lastMasterSeenMs = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
+    _idleListenUntilMs = 0;
+    _fastHeartbeatUntilMs = 0;
     clearChannelSwitchState();
     _clientHoldChannelUntilMs = 0;
     clearSensorQueue();
@@ -574,6 +592,7 @@ void MeshManager::becomeMaster() {
     _lastPeerSweepMs = 0;
     _lastHealthMs = 0;
     _lastSensorSendMs = 0;
+    _fastHeartbeatUntilMs = millis() + FAST_HEARTBEAT_WINDOW_MS;
     clearSensorQueue();
     _masterNodeHash = _nodeHash;
     _masterBootId = _bootId;
@@ -604,6 +623,8 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     _pendingChannel = 0;
     _switchAtMs = 0;
     _clientHoldChannelUntilMs = 0;
+    _idleListenUntilMs = 0;
+    _fastHeartbeatUntilMs = 0;
     _masterNodeHash = master.nodeHash;
     _masterBootId = master.bootId;
     _lastMasterSeenMs = millis();
