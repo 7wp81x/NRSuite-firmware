@@ -176,6 +176,8 @@ private:
     uint32_t _channelSwitchAckHashes[REPLAY_SLOTS] = {};
     uint8_t  _channelSwitchAckCount = 0;
     uint32_t _clientHoldChannelUntilMs = 0;
+    uint8_t  _clientSwitchRequestTarget = 0;
+    uint32_t _clientSwitchRequestDeadlineMs = 0;
 
     PeerEntry _peers[REPLAY_SLOTS] = {};
 

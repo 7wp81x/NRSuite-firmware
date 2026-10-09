@@ -136,6 +136,7 @@ void MeshManager::update() {
             } else if (now >= _switchAtMs) {
                 setChannel(_channelSwitchTarget, true);
                 _lastHealthMs = 0;
+                _fastHeartbeatUntilMs = now + FAST_HEARTBEAT_WINDOW_MS;
                 sendChannelSwitchEvent("committed");
                 sendStatusEvent("channel_switched");
                 clearChannelSwitchState();
@@ -164,6 +165,19 @@ void MeshManager::update() {
     }
 
     if (_role == ROLE_CLIENT) {
+        // If the commit packet was missed, fall back to switching after the
+        // request ACK timeout. This keeps a client that heard the request from
+        // being stranded on the old channel forever.
+        if (_pendingChannel == 0 &&
+            _clientSwitchRequestTarget != 0 &&
+            now >= _clientSwitchRequestDeadlineMs) {
+            _pendingChannel = _clientSwitchRequestTarget;
+            _switchAtMs = now + CHANNEL_SWITCH_COMMIT_DELAY_MS;
+            _clientHoldChannelUntilMs = now + CHANNEL_SWITCH_HOLD_MS;
+            _clientSwitchRequestTarget = 0;
+            _clientSwitchRequestDeadlineMs = 0;
+            sendStatusEvent("channel_switch_fallback");
+        }
         if (_pendingChannel != 0 && now >= _switchAtMs) {
             // Do not persist the candidate switch channel yet. It is saved
             // only when a master heartbeat is successfully adopted again.
@@ -171,6 +185,7 @@ void MeshManager::update() {
             _pendingChannel = 0;
             _switchAtMs = 0;
             _lastMasterSeenMs = now;
+            _lastJoinMs = 0;
             _lastHealthMs = 0;
             _clientHoldChannelUntilMs = now + CHANNEL_SWITCH_HOLD_MS;
             sendStatusEvent("channel_switched");
@@ -187,6 +202,8 @@ void MeshManager::update() {
                 _lastJoinMs = 0;
                 _pendingChannel = 0;
                 _switchAtMs = 0;
+                _clientSwitchRequestTarget = 0;
+                _clientSwitchRequestDeadlineMs = 0;
                 _scanChannel = _channel;
                 _lastScanHopMs = now;
                 _idleListenUntilMs = now + MESH_INITIAL_LISTEN_MS;
@@ -240,6 +257,8 @@ void MeshManager::stop() {
     _masterBootId = 0;
     _idleListenUntilMs = 0;
     _fastHeartbeatUntilMs = 0;
+    _clientSwitchRequestTarget = 0;
+    _clientSwitchRequestDeadlineMs = 0;
     clearChannelSwitchState();
     _clientHoldChannelUntilMs = 0;
     clearSensorQueue();
@@ -623,6 +642,8 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
     _pendingChannel = 0;
     _switchAtMs = 0;
     _clientHoldChannelUntilMs = 0;
+    _clientSwitchRequestTarget = 0;
+    _clientSwitchRequestDeadlineMs = 0;
     _idleListenUntilMs = 0;
     _fastHeartbeatUntilMs = 0;
     _masterNodeHash = master.nodeHash;
@@ -1736,7 +1757,12 @@ void MeshManager::handleChannelSwitchPacket(const uint8_t* data, size_t len) {
     if (targetChannel < 1 || targetChannel > 13) return;
 
     if (phase == 1) {
-        // Master request: acknowledge and wait for the commit.
+        // Master request: acknowledge and wait for the commit. If the commit
+        // never arrives, switch after the ACK timeout as a fallback.
+        _clientSwitchRequestTarget = targetChannel;
+        _clientSwitchRequestDeadlineMs =
+            millis() + CHANNEL_SWITCH_ACK_TIMEOUT_MS +
+            CHANNEL_SWITCH_COMMIT_DELAY_MS;
         sendChannelSwitchAck(targetChannel, switchId);
         sendStatusEvent("channel_switch_ack_sent");
         return;
@@ -1748,6 +1774,8 @@ void MeshManager::handleChannelSwitchPacket(const uint8_t* data, size_t len) {
         _pendingChannel = targetChannel;
         _switchAtMs = millis() + CHANNEL_SWITCH_COMMIT_DELAY_MS;
         _clientHoldChannelUntilMs = millis() + CHANNEL_SWITCH_HOLD_MS;
+        _clientSwitchRequestTarget = 0;
+        _clientSwitchRequestDeadlineMs = 0;
         sendStatusEvent("channel_switch_commit");
     }
 }
