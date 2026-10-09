@@ -28,7 +28,8 @@ public:
                                              uint8_t channel,
                                              uint16_t meshWindowMs,
                                              uint16_t detectorWindowMs,
-                                             uint16_t hopDwellMs);
+                                             uint16_t hopDwellMs,
+                                             uint16_t hopMask);
 
     void setDetectorControlCallback(DetectorControlCallback cb) {
         _detectorControlCallback = cb;
@@ -37,7 +38,8 @@ public:
     bool beginDistributedDetector(bool start, uint8_t mode, uint8_t channel,
                                   uint16_t meshWindowMs,
                                   uint16_t detectorWindowMs,
-                                  uint16_t hopDwellMs);
+                                  uint16_t hopDwellMs,
+                                  uint16_t hopMask);
     // Detector-window radio ownership. MeshManager owns the radio while the
     // detector window is active; the scheduler calls these hooks rather than
     // touching esp_wifi_set_channel/promiscuous directly.
@@ -199,6 +201,7 @@ private:
     uint16_t _detectorControlMeshWindowMs = 4500;
     uint16_t _detectorControlDetectorWindowMs = 1500;
     uint16_t _detectorControlHopDwellMs = 350;
+    uint16_t _detectorControlHopMask = 0;
     uint8_t  _detectorControlRetriesLeft = 0;
     uint32_t _detectorControlNextSendMs = 0;
 
@@ -264,7 +267,7 @@ private:
     uint32_t nextSensorSeq();
     void sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
                              uint16_t meshWindowMs, uint16_t detectorWindowMs,
-                             uint16_t hopDwellMs);
+                             uint16_t hopDwellMs, uint16_t hopMask);
     void handleDetectorControl(const uint8_t* data, size_t len);
     void sweepDetectorControl(uint32_t now);
 

@@ -1515,10 +1515,11 @@ void MeshManager::exitDetectorWindow() {
 void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
                                       uint16_t meshWindowMs,
                                       uint16_t detectorWindowMs,
-                                      uint16_t hopDwellMs) {
+                                      uint16_t hopDwellMs,
+                                      uint16_t hopMask) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
 
-    uint8_t payload[9];
+    uint8_t payload[11];
     payload[0] = start ? 1 : 0;
     payload[1] = mode;
     payload[2] = channel;
@@ -1528,6 +1529,8 @@ void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
     payload[6] = (uint8_t)((detectorWindowMs >> 8) & 0xFF);
     payload[7] = (uint8_t)(hopDwellMs & 0xFF);
     payload[8] = (uint8_t)((hopDwellMs >> 8) & 0xFF);
+    payload[9] = (uint8_t)(hopMask & 0xFF);
+    payload[10] = (uint8_t)((hopMask >> 8) & 0xFF);
 
     _counter++;
     if (_counter == 0) _counter = 1;
@@ -1548,7 +1551,8 @@ bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,
                                            uint8_t channel,
                                            uint16_t meshWindowMs,
                                            uint16_t detectorWindowMs,
-                                           uint16_t hopDwellMs) {
+                                           uint16_t hopDwellMs,
+                                           uint16_t hopMask) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return false;
 
     _detectorControlStart = start;
@@ -1557,12 +1561,13 @@ bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,
     _detectorControlMeshWindowMs = meshWindowMs;
     _detectorControlDetectorWindowMs = detectorWindowMs;
     _detectorControlHopDwellMs = hopDwellMs;
+    _detectorControlHopMask = hopMask;
     _detectorControlRetriesLeft = 5;
     _detectorControlNextSendMs = 0;
     _detectorControlPending = true;
 
     sendDetectorControl(start, mode, channel, meshWindowMs, detectorWindowMs,
-                        hopDwellMs);
+                        hopDwellMs, hopMask);
     return true;
 }
 
@@ -1577,7 +1582,8 @@ void MeshManager::sweepDetectorControl(uint32_t now) {
     sendDetectorControl(_detectorControlStart, _detectorControlMode,
                         _detectorControlChannel, _detectorControlMeshWindowMs,
                         _detectorControlDetectorWindowMs,
-                        _detectorControlHopDwellMs);
+                        _detectorControlHopDwellMs,
+                        _detectorControlHopMask);
     if (_detectorControlRetriesLeft > 0) _detectorControlRetriesLeft--;
     if (_detectorControlRetriesLeft == 0) {
         _detectorControlPending = false;
@@ -1597,12 +1603,15 @@ void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
     const uint16_t meshWindowMs = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
     const uint16_t detectorWindowMs = (uint16_t)data[5] | ((uint16_t)data[6] << 8);
     const uint16_t hopDwellMs = (uint16_t)data[7] | ((uint16_t)data[8] << 8);
+    const uint16_t hopMask = len >= 11
+        ? ((uint16_t)data[9] | ((uint16_t)data[10] << 8))
+        : 0;
     if (detectorWindowMs < 300 || detectorWindowMs > 2500) return;
     if (meshWindowMs < 2000 || meshWindowMs > 10000) return;
     if (hopDwellMs < 200 || hopDwellMs > 1000) return;
     if (_detectorControlCallback) {
         _detectorControlCallback(start, mode, channel, meshWindowMs,
-                                 detectorWindowMs, hopDwellMs);
+                                 detectorWindowMs, hopDwellMs, hopMask);
     }
 }
 

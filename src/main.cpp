@@ -75,6 +75,7 @@ static uint8_t  gDistChannel = 1;
 static uint16_t gDistMeshWindowMs = DIST_DEFAULT_MESH_WINDOW_MS;
 static uint16_t gDistDetectorWindowMs = DIST_DEFAULT_DETECTOR_WINDOW_MS;
 static uint16_t gDistHopDwellMs = DIST_DEFAULT_HOP_DWELL_MS;
+static uint16_t gDistHopMask = 0;
 static bool     gDistDetectorWindowActive = false;
 static uint32_t gDistNextSwitchMs = 0;
 static uint8_t  gDistHopChannel = 1;
@@ -88,10 +89,32 @@ static bool detectorNodeIsClient() {
     return strcmp(mesh.roleName(), "client") == 0;
 }
 
+static uint16_t effectiveHopMask() {
+    return gDistHopMask != 0 ? gDistHopMask : 0x1FFF;
+}
+
+static uint8_t firstChannelForMask(uint16_t mask, uint8_t fallback) {
+    const uint16_t eff = mask != 0 ? mask : 0x1FFF;
+    for (uint8_t ch = 1; ch <= 13; ch++) {
+        if (eff & (uint16_t)(1u << (ch - 1))) return ch;
+    }
+    return (fallback >= 1 && fallback <= 13) ? fallback : 1;
+}
+
+static uint8_t nextChannelForMask(uint16_t mask, uint8_t current) {
+    const uint16_t eff = mask != 0 ? mask : 0x1FFF;
+    for (uint8_t step = 1; step <= 13; step++) {
+        uint8_t ch = (uint8_t)(((current - 1 + step) % 13) + 1);
+        if (eff & (uint16_t)(1u << (ch - 1))) return ch;
+    }
+    return current;
+}
+
 static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
                                           uint16_t meshWindowMs,
                                           uint16_t detectorWindowMs,
-                                          uint16_t hopDwellMs) {
+                                          uint16_t hopDwellMs,
+                                          uint16_t hopMask) {
     if (!detectorNodeIsMaster() && !detectorNodeIsClient()) return;
 
     gDistMode = mode;
@@ -99,6 +122,7 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
     gDistMeshWindowMs = meshWindowMs;
     gDistDetectorWindowMs = detectorWindowMs;
     gDistHopDwellMs = hopDwellMs;
+    gDistHopMask = hopMask;
 
     deauthDetector.setExternalRadio(true);
 
@@ -116,7 +140,7 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
     gDistLocalActive = true;
     gDistDetectorWindowActive = false;
     gDistNextSwitchMs = 0;
-    gDistHopChannel = channel;
+    gDistHopChannel = firstChannelForMask(hopMask, channel);
 
     if (mode == DIST_MODE_SAME_CHANNEL) {
         // Experimental single-channel coexistence mode.
@@ -154,7 +178,8 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
                                                uint8_t channel,
                                                uint16_t meshWindowMs,
                                                uint16_t detectorWindowMs,
-                                               uint16_t hopDwellMs) {
+                                               uint16_t hopDwellMs,
+                                               uint16_t hopMask) {
     if (start) {
         const bool sameConfig =
             gDistConfigInitialized &&
@@ -162,7 +187,8 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
             gDistChannel == channel &&
             gDistMeshWindowMs == meshWindowMs &&
             gDistDetectorWindowMs == detectorWindowMs &&
-            gDistHopDwellMs == hopDwellMs;
+            gDistHopDwellMs == hopDwellMs &&
+            gDistHopMask == hopMask;
         if (sameConfig && (gDistLocalActive || gDistPendingStart)) {
             return;  // repeated start control is idempotent
         }
@@ -172,6 +198,7 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
         gDistMeshWindowMs = meshWindowMs;
         gDistDetectorWindowMs = detectorWindowMs;
         gDistHopDwellMs = hopDwellMs;
+        gDistHopMask = hopMask;
         gDistPendingStart = true;
         gDistPendingStop = false;
     } else {
@@ -210,7 +237,8 @@ static void updateDistributedDetectorScheduler() {
             return;
         }
         startDistributedDetectorLocal(gDistMode, gDistChannel, gDistMeshWindowMs,
-                                      gDistDetectorWindowMs, gDistHopDwellMs);
+                                      gDistDetectorWindowMs, gDistHopDwellMs,
+                                      gDistHopMask);
     }
 
     if (!gDistLocalActive) return;
@@ -224,7 +252,7 @@ static void updateDistributedDetectorScheduler() {
     if (!gDistDetectorWindowActive) {
         if (gDistNextSwitchMs == 0 || now >= gDistNextSwitchMs) {
             const uint8_t firstChannel = (gDistMode == DIST_MODE_HOP)
-                ? ((gDistChannel >= 1 && gDistChannel <= 13) ? gDistChannel : 1)
+                ? firstChannelForMask(gDistHopMask, gDistChannel)
                 : gDistChannel;
             if (mesh.enterDetectorWindow(firstChannel, true)) {
                 gDistDetectorWindowActive = true;
@@ -240,7 +268,7 @@ static void updateDistributedDetectorScheduler() {
     }
 
     if (gDistMode == DIST_MODE_HOP && now - gDistLastHopMs >= gDistHopDwellMs) {
-        gDistHopChannel = (gDistHopChannel % 13) + 1;
+        gDistHopChannel = nextChannelForMask(gDistHopMask, gDistHopChannel);
         if (mesh.setDetectorWindowChannel(gDistHopChannel)) {
             deauthDetector.setChannelHint(gDistHopChannel);
             gDistLastHopMs = now;
@@ -788,13 +816,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             uint16_t detectorWindowMs = doc["args"]["detector_window_ms"] | DIST_DEFAULT_DETECTOR_WINDOW_MS;
             uint16_t hopDwellMs = doc["args"]["detector_hop_dwell_ms"] |
                                   (doc["args"]["interval_ms"] | DIST_DEFAULT_HOP_DWELL_MS);
+            uint16_t hopMask = doc["args"]["hop_mask"] | 0;
             meshWindowMs = (uint16_t)constrain((int)meshWindowMs, 2000, 10000);
             detectorWindowMs = (uint16_t)constrain((int)detectorWindowMs, 300, 2500);
             hopDwellMs = (uint16_t)constrain((int)hopDwellMs, 200, 1000);
+            hopMask &= 0x1FFF;
 
             if (!mesh.beginDistributedDetector(true, distMode, requestedChannel,
                                                meshWindowMs, detectorWindowMs,
-                                               hopDwellMs)) {
+                                               hopDwellMs, hopMask)) {
                 proto.sendResp(id, false, "mesh not active");
                 return;
             }
@@ -804,13 +834,14 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             gDistMeshWindowMs = meshWindowMs;
             gDistDetectorWindowMs = detectorWindowMs;
             gDistHopDwellMs = hopDwellMs;
+            gDistHopMask = hopMask;
             gDistControlActive = true;
 
             const bool masterScans = (distMode == DIST_MODE_SAME_CHANNEL);
             if (masterScans) {
                 startDistributedDetectorLocal(distMode, requestedChannel,
                                               meshWindowMs, detectorWindowMs,
-                                              hopDwellMs);
+                                              hopDwellMs, hopMask);
             } else {
                 gDistLocalActive = false;
             }
@@ -823,6 +854,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             resp["mesh_window_ms"]     = meshWindowMs;
             resp["detector_window_ms"] = detectorWindowMs;
             resp["interval_ms"]        = hopDwellMs;
+            resp["hop_mask"]           = hopMask;
             resp["master_scanning"]    = masterScans;
             String json;
             serializeJson(resp, json);
@@ -875,7 +907,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             mesh.beginDistributedDetector(false, gDistMode, gDistChannel,
                                           gDistMeshWindowMs,
                                           gDistDetectorWindowMs,
-                                          gDistHopDwellMs);
+                                          gDistHopDwellMs,
+                                          gDistHopMask);
             stopDistributedDetectorLocal();
             gDistControlActive = false;
         } else {
