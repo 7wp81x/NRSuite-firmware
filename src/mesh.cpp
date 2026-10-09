@@ -361,8 +361,18 @@ bool MeshManager::startRadio() {
     esp_wifi_start();
     esp_err_t err = esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
     if (err != ESP_OK) {
+        // A persisted channel may be regulatory-unavailable on this build
+        // (commonly 12-13). Fall back to a safe channel instead of leaving
+        // the node permanently disabled.
         sendError("channel", esp_err_to_name(err));
-        return false;
+        _channel = 1;
+        _scanChannel = 1;
+        err = esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
+        if (err != ESP_OK) {
+            sendError("channel", esp_err_to_name(err));
+            return false;
+        }
+        storeChannel();
     }
 
     err = esp_now_init();
@@ -1609,15 +1619,20 @@ bool MeshManager::storeChannel() {
 
 bool MeshManager::setChannel(uint8_t channel, bool persist) {
     if (channel < 1 || channel > 13) return false;
-    _channel = channel;
-    _scanChannel = channel;
+
+    const uint8_t previousChannel = _channel;
     if (_espNowActive) {
         const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
         if (err != ESP_OK) {
             sendError("channel", esp_err_to_name(err));
+            _channel = previousChannel;
+            _scanChannel = previousChannel;
             return false;
         }
     }
+
+    _channel = channel;
+    _scanChannel = channel;
     if (persist) {
         storeChannel();
     }
