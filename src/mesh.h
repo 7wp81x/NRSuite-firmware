@@ -124,7 +124,7 @@ private:
     static const uint32_t MASTER_TIMEOUT_MS    = 5000;
     static const uint32_t JOIN_INTERVAL_MS     = 2000;
     static const uint32_t JOIN_ACK_TIMEOUT_MS  = 6000;
-    static const uint32_t PEER_TIMEOUT_MS      = 8000;
+    static const uint32_t PEER_TIMEOUT_MS      = 12000;
     static const uint32_t AUTH_WINDOW_MS       = 30000;
     static const uint32_t MIN_FREE_HEAP_BYTES  = 40000;
     static const uint32_t MESH_SCAN_DWELL_MS   = 300;

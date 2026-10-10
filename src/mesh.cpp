@@ -1614,6 +1614,16 @@ void MeshManager::exitDetectorWindow() {
     if (_espNowActive) {
         applyRadioChannel(_channel, "detector_window_exit");
     }
+    if (_role == ROLE_CLIENT) {
+        // The detector window intentionally took the client off the mesh
+        // channel. Treat the return as fresh mesh activity so the first
+        // update after the window sends JOIN/health immediately and does not
+        // trip the master timeout from the intentional off-channel gap.
+        _lastMasterSeenMs = millis();
+        _lastJoinMs = 0;
+        _lastHealthMs = 0;
+        _lastSensorSendMs = 0;
+    }
 }
 
 void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
