@@ -231,6 +231,7 @@ private:
     bool clearKeys();
     bool startRadio();
     void stopRadio();
+    void syncEspNowPeerChannel(uint8_t channel);
 
     bool activate();
     void becomeMaster();

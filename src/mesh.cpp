@@ -408,6 +408,31 @@ bool MeshManager::clearKeys() {
 
 // ── Radio lifecycle ──────────────────────────────────────────────────────────
 
+// ESP-NOW peer entries are bound to the channel they were added on. The
+// broadcast peer is added with the current channel, but recovery hopping changes
+// the Wi-Fi channel without touching the peer table. Rebind the peer after each
+// successful channel change so JOIN/ACK/heartbeat frames use the live channel.
+void MeshManager::syncEspNowPeerChannel(uint8_t channel) {
+    if (!_espNowActive || channel < 1 || channel > 13) return;
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, BROADCAST_MAC, 6);
+    peer.channel = channel;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+
+    esp_err_t err = esp_now_mod_peer(&peer);
+    if (err != ESP_OK) {
+        esp_now_del_peer(BROADCAST_MAC);
+        err = esp_now_add_peer(&peer);
+    }
+    if (err != ESP_OK) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "sync peer channel %u: %s",
+                 (unsigned)channel, esp_err_to_name(err));
+        sendError("espnow_peer", msg);
+    }
+}
+
 bool MeshManager::startRadio() {
     if (_espNowActive) return true;
 
@@ -439,7 +464,7 @@ bool MeshManager::startRadio() {
 
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, BROADCAST_MAC, 6);
-    peer.channel = 0;
+    peer.channel = radioChannel();
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
     err = esp_now_add_peer(&peer);
@@ -848,7 +873,10 @@ void MeshManager::sendJoin() {
         return;
     }
 
-    esp_now_send(BROADCAST_MAC, packet, packetLen);
+    const esp_err_t joinErr = esp_now_send(BROADCAST_MAC, packet, packetLen);
+    if (joinErr != ESP_OK) {
+        sendError("send_join", esp_err_to_name(joinErr));
+    }
     _lastJoinMs = millis();
 }
 
@@ -871,7 +899,10 @@ void MeshManager::sendJoinAck(uint32_t targetNodeHash) {
         sendError("encrypt", "join ack encode failed");
         return;
     }
-    esp_now_send(BROADCAST_MAC, packet, packetLen);
+    const esp_err_t ackErr = esp_now_send(BROADCAST_MAC, packet, packetLen);
+    if (ackErr != ESP_OK) {
+        sendError("send_join_ack", esp_err_to_name(ackErr));
+    }
 }
 
 void MeshManager::espNowRecvCallback(const esp_now_recv_info_t* info,
@@ -1837,6 +1868,7 @@ bool MeshManager::applyRadioChannel(uint8_t channel, const char* source) {
         }
         return false;
     }
+    syncEspNowPeerChannel(channel);
     return true;
 }
 

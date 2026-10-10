@@ -142,12 +142,15 @@ void DeauthDetector::update() {
 
     if (!_externalRadio && _active && _hopMode && millis() - _lastHopMs >= _hopIntervalMs) {
         _lastHopMs = millis();
-        _channel = (_channel % 13) + 1;
-        esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
-
-        JsonDocument ev;
-        ev["channel"] = _channel;
-        _proto->sendEvent("deauth_detector_hop", ev);
+        const uint8_t nextChannel = (uint8_t)((_channel % 13) + 1);
+        // Advance the cursor even if the driver rejects a region-restricted
+        // channel, but only report channels that are actually selected.
+        _channel = nextChannel;
+        if (esp_wifi_set_channel(nextChannel, WIFI_SECOND_CHAN_NONE) == ESP_OK) {
+            JsonDocument ev;
+            ev["channel"] = nextChannel;
+            _proto->sendEvent("deauth_detector_hop", ev);
+        }
     }
 
     Alert alert;
