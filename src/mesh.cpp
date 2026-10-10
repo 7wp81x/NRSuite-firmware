@@ -1711,7 +1711,9 @@ void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
     if (!data || len < 9) return;
     const bool start = data[0] != 0;
     const uint8_t mode = data[1];
-    if (mode > 2) return;
+    // Distributed HOP is disabled for now; only same-channel (0) and fixed
+    // (1) control packets are accepted.
+    if (mode >= 2) return;
     const uint8_t channel = data[2];
     if (channel < 1 || channel > 13) return;
     const uint16_t meshWindowMs = (uint16_t)data[3] | ((uint16_t)data[4] << 8);

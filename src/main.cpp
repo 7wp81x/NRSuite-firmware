@@ -803,6 +803,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                 distMode = DIST_MODE_HOP;
             }
 
+            if (distMode == DIST_MODE_HOP) {
+                proto.sendResp(id, false, "distributed hop temporarily disabled");
+                return;
+            }
+
             uint8_t requestedChannel = doc["args"]["channel"] | mesh.currentChannel();
             if (distMode == DIST_MODE_SAME_CHANNEL) {
                 requestedChannel = mesh.currentChannel();

@@ -32,7 +32,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 |---|---|---|
 | Rogue AP Detector | ✅ | Baseline SSID→BSSID/channel/security; flags mismatches, downgrades, duplicate SSIDs, KARMA-style probe-response behavior |
 | Deauth Detector | ✅ | Passive deauth/disassoc monitoring with BSSID/client/RSSI/reason filters, async alerts, and live logs |
-| Distributed Deauth Detector | 🟡 | Phase 3B mesh client time-slicing, encrypted deauth reports, master control/reporting; same-channel mode hardware-validated on S3 + S2, fixed pending, HOP temporarily disabled in app pending time-slicing validation |
+| Distributed Deauth Detector | 🟡 | Phase 3B mesh client time-slicing, encrypted deauth reports, master control/reporting; same-channel mode hardware-validated on S3 + S2, fixed pending, distributed HOP removed from app/firmware path pending time-slicing redesign |
 | Deauth Locator | 📋 | RSSI-based direction/distance estimate; multi-node triangulation |
 | Tracker Detector | ✅ | Android-side Find My-style detection using BLE Scanner raw payloads, repeated sightings, and alerts |
 | Client Detector | ✅ | Passive probe/assoc/reassoc/auth monitoring plus active deauth-trigger mode |
