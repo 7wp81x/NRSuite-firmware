@@ -170,6 +170,7 @@ private:
 
     uint8_t  _channel = 1;
     uint8_t  _scanChannel = 1;
+    uint16_t _unavailableScanMask = 0;  // bit 0 = channel 1, etc.
     uint8_t  _pendingChannel = 0;
     uint32_t _lastScanHopMs = 0;
     uint32_t _idleListenUntilMs = 0;

@@ -82,6 +82,8 @@ void MeshManager::update() {
             const uint8_t next = nextRecoveryChannel();
             if (applyRadioChannel(next, "candidate_scan")) {
                 _scanChannel = next;
+            } else {
+                _unavailableScanMask |= (uint16_t)(1u << (next - 1));
             }
             _lastScanHopMs = now;
         }
@@ -110,6 +112,11 @@ void MeshManager::update() {
                 // and radio_channel so MESH_ACTIVATE cannot start the node on
                 // a transient scan channel.
                 _scanChannel = next;
+            } else {
+                // Some regulatory domains reject 12/13. Mark the channel
+                // unavailable for this activation so recovery hopping does
+                // not get stuck retrying it forever.
+                _unavailableScanMask |= (uint16_t)(1u << (next - 1));
             }
             _lastScanHopMs = now;
         }
@@ -665,6 +672,7 @@ bool MeshManager::activate() {
     _lastMasterSeenMs = 0;
     _lastScanHopMs = millis();
     _scanChannel = _channel;
+    _unavailableScanMask = 0;
     _masterNodeHash = 0;
     _masterBootId = 0;
     clearSensorQueue();
@@ -730,6 +738,7 @@ void MeshManager::adoptMaster(const PeerEntry& master) {
         if (adoptedChannel >= 1 && adoptedChannel <= 13) {
             _channel = adoptedChannel;
             _scanChannel = adoptedChannel;
+            _unavailableScanMask &= (uint16_t)~(1u << (adoptedChannel - 1));
             // Only persist the channel once the master has ACKed our JOIN.
             if (_joinAckReceived) {
                 storeChannel();
@@ -1817,10 +1826,15 @@ bool MeshManager::applyRadioChannel(uint8_t channel, const char* source) {
     if (channel < 1 || channel > 13) return false;
     const esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     if (err != ESP_OK) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "%s: %s",
-                 source ? source : "set_channel", esp_err_to_name(err));
-        sendError("channel_set", msg);
+        const bool recoveryScan = source &&
+            (strcmp(source, "idle_scan") == 0 || strcmp(source, "candidate_scan") == 0);
+        if (!recoveryScan) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s(channel %u): %s",
+                     source ? source : "set_channel", (unsigned)channel,
+                     esp_err_to_name(err));
+            sendError("channel_set", msg);
+        }
         return false;
     }
     return true;
@@ -1851,6 +1865,7 @@ bool MeshManager::setChannel(uint8_t channel, bool persist) {
 
     _channel = channel;
     _scanChannel = channel;
+    _unavailableScanMask &= (uint16_t)~(1u << (channel - 1));
     if (persist) {
         storeChannelValue(channel);
     }
@@ -1858,13 +1873,16 @@ bool MeshManager::setChannel(uint8_t channel, bool persist) {
 }
 
 uint8_t MeshManager::nextRecoveryChannel() {
-    if (_scanChannel < 1 || _scanChannel > 13) {
-        return 1;
+    const uint8_t start = (_scanChannel >= 1 && _scanChannel <= 13) ? _scanChannel : 1;
+    for (uint8_t step = 1; step <= 13; step++) {
+        const uint8_t channel = (uint8_t)(((start - 1 + step) % 13) + 1);
+        if ((_unavailableScanMask & (uint16_t)(1u << (channel - 1))) == 0) {
+            return channel;
+        }
     }
-    if (_scanChannel >= 13) {
-        return 1;
-    }
-    return (uint8_t)(_scanChannel + 1);
+    // All channels were rejected; clear the mask and let the next pass retry.
+    _unavailableScanMask = 0;
+    return 1;
 }
 
 void MeshManager::clearChannelSwitchState() {
