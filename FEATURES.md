@@ -32,7 +32,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 |---|---|---|
 | Rogue AP Detector | ✅ | Baseline SSID→BSSID/channel/security; flags mismatches, downgrades, duplicate SSIDs, KARMA-style probe-response behavior |
 | Deauth Detector | ✅ | Passive deauth/disassoc monitoring with BSSID/client/RSSI/reason filters, async alerts, and live logs |
-| Distributed Deauth Detector | 🟡 | Phase 3B mesh client time-slicing, encrypted deauth reports, master control/reporting; same-channel mode hardware-validated on S3 + S2, fixed/hop pending |
+| Distributed Deauth Detector | 🟡 | Phase 3B mesh client time-slicing, encrypted deauth reports, master control/reporting; same-channel mode hardware-validated on S3 + S2, fixed pending, HOP temporarily disabled in app pending time-slicing validation |
 | Deauth Locator | 📋 | RSSI-based direction/distance estimate; multi-node triangulation |
 | Tracker Detector | ✅ | Android-side Find My-style detection using BLE Scanner raw payloads, repeated sightings, and alerts |
 | Client Detector | ✅ | Passive probe/assoc/reassoc/auth monitoring plus active deauth-trigger mode |
@@ -50,7 +50,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 | Encrypted ESP-NOW Transport | ✅ | AES-CCM transport encryption with replay protection |
 | Activation Handshake | ✅ | Decrypt, auth, replay-counter, and 30 s USB auth window |
 | Session Locking | ✅ | Fresh master session ID; clients lock to it and recover after master reboot |
-| Heartbeat/Auto-Timeout | ✅ | 1 s master heartbeat, 5 s master timeout, 8 s peer timeout |
+| Heartbeat/Auto-Timeout | ✅ | 1 s master heartbeat, 5 s master timeout, 12 s peer timeout |
 | Channel Switch ACK Handshake | ✅ | Encrypted request/ACK/commit, target persisted before request, live radio read-back, master timeout fallback, client 60 s hold; hardware-validated on S3 + S2 (durable-target fix pending hardware revalidation) |
 | Join ACK Handshake | 🟡 | Master ACKs accepted clients with its live radio channel; clients only lock/persist after JOIN_ACK, otherwise resume hopping; hardware validation pending |
 | Detector Focus-Hop | 🟡 | Hop mask limits detector hopping to app-selected detected channels; hardware validation pending |
