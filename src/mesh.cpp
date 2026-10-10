@@ -1007,6 +1007,9 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
         // Re-ACK every join so a client that missed an earlier ACK can lock
         // its channel without waiting for the next join interval.
         sendJoinAck(nodeHash);
+        // If a distributed detector is already running, make the new client
+        // join it too. Existing clients treat repeated controls as idempotent.
+        sendActiveDetectorControl();
         return;
     }
 
@@ -1041,6 +1044,7 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
             // A client which reached us before its JOIN arrived can lock on
             // this ACK; normally the JOIN path already ACKed it.
             sendJoinAck(nodeHash);
+            sendActiveDetectorControl();
         }
 
         const uint8_t kind = payloadData[0];
@@ -1659,6 +1663,16 @@ void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
         return;
     }
     esp_now_send(BROADCAST_MAC, packet, packetLen);
+}
+
+void MeshManager::sendActiveDetectorControl() {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+    if (!_detectorControlStart) return;
+    sendDetectorControl(_detectorControlStart, _detectorControlMode,
+                        _detectorControlChannel, _detectorControlMeshWindowMs,
+                        _detectorControlDetectorWindowMs,
+                        _detectorControlHopDwellMs,
+                        _detectorControlHopMask);
 }
 
 bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,

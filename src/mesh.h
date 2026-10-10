@@ -276,6 +276,7 @@ private:
     void sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
                              uint16_t meshWindowMs, uint16_t detectorWindowMs,
                              uint16_t hopDwellMs, uint16_t hopMask);
+    void sendActiveDetectorControl();
     void handleDetectorControl(const uint8_t* data, size_t len);
     void sweepDetectorControl(uint32_t now);
 
