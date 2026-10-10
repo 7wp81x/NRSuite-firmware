@@ -225,7 +225,25 @@ void MeshManager::update() {
         if (_pendingChannel != 0 && now >= _switchAtMs) {
             // Do not persist the candidate switch channel yet. It is saved
             // only when a master heartbeat is successfully adopted again.
-            setChannel(_pendingChannel, false);
+            if (!setChannel(_pendingChannel, false)) {
+                // The driver rejected the committed target. Resume recovery
+                // hopping instead of pretending we switched and holding on a
+                // channel we never reached.
+                _role = ROLE_IDLE;
+                _sessionId = 0;
+                _lastJoinMs = 0;
+                _pendingChannel = 0;
+                _switchAtMs = 0;
+                _clientSwitchRequestTarget = 0;
+                _clientSwitchRequestDeadlineMs = 0;
+                _clientHoldChannelUntilMs = 0;
+                _lastMasterSeenMs = 0;
+                _scanChannel = _channel;
+                _lastScanHopMs = now;
+                _idleListenUntilMs = now + MESH_INITIAL_LISTEN_MS;
+                sendStatusEvent("channel_switch_failed");
+                return;
+            }
             _pendingChannel = 0;
             _switchAtMs = 0;
             _lastMasterSeenMs = now;
