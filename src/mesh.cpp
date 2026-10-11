@@ -326,7 +326,11 @@ void MeshManager::stop() {
     stopRadio();
     _role = ROLE_DISABLED;
     _sessionId = 0;
-    _counter = 0;
+    // Keep _counter monotonic for the whole boot. Receivers cache the last
+    // accepted counter per node hash and reset it only when boot_id changes.
+    // Resetting it here after a scan/STOP_ALL would make every later packet
+    // look like a replay until the counter caught up with the old high-water
+    // mark.
     _lastBroadcastMs = 0;
     _lastJoinMs = 0;
     _joinAckReceived = false;
@@ -751,7 +755,8 @@ bool MeshManager::activate() {
     _candidateSinceMs = millis();
     _electionTs = _candidateSinceMs ? _candidateSinceMs : 1;
     _sessionId = 0;
-    _counter = 0;
+    // Do not reset _counter: mesh activation can happen many times in one
+    // boot and peers must see monotonically increasing replay counters.
     _seq = 0;
     _lastBroadcastMs = 0;
     _lastJoinMs = 0;
@@ -779,7 +784,8 @@ bool MeshManager::activate() {
 void MeshManager::becomeMaster() {
     _role = ROLE_MASTER;
     _sessionId = randomSessionId();
-    _counter = 0;
+    // _counter stays monotonic across sessions within one boot. The session
+    // id is not part of replay validation; only boot_id can reset counters.
     _seq = 0;
     _lastBroadcastMs = 0;
     _lastPeerSweepMs = 0;
