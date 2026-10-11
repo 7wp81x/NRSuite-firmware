@@ -318,6 +318,9 @@ void MeshManager::stop() {
     _detectorControlPending = false;
     _detectorControlRetriesLeft = 0;
     _detectorControlNextSendMs = 0;
+    _detectorControlHasBssid = false;
+    _detectorControlHasClient = false;
+    _detectorControlRssiMin = -127;
     _scanControlPending = false;
     _scanControlStart = false;
     _scanControlRetriesLeft = 0;
@@ -1723,7 +1726,7 @@ void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
                                       uint16_t hopMask) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
 
-    uint8_t payload[11];
+    uint8_t payload[25] = {0};
     payload[0] = start ? 1 : 0;
     payload[1] = mode;
     payload[2] = channel;
@@ -1735,6 +1738,11 @@ void MeshManager::sendDetectorControl(bool start, uint8_t mode, uint8_t channel,
     payload[8] = (uint8_t)((hopDwellMs >> 8) & 0xFF);
     payload[9] = (uint8_t)(hopMask & 0xFF);
     payload[10] = (uint8_t)((hopMask >> 8) & 0xFF);
+    payload[11] = (uint8_t)((_detectorControlHasBssid ? 0x01 : 0) |
+                            (_detectorControlHasClient ? 0x02 : 0));
+    if (_detectorControlHasBssid) memcpy(payload + 12, _detectorControlBssid, 6);
+    if (_detectorControlHasClient) memcpy(payload + 18, _detectorControlClient, 6);
+    payload[24] = (uint8_t)_detectorControlRssiMin;
 
     _counter++;
     if (_counter == 0) _counter = 1;
@@ -1766,7 +1774,10 @@ bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,
                                            uint16_t meshWindowMs,
                                            uint16_t detectorWindowMs,
                                            uint16_t hopDwellMs,
-                                           uint16_t hopMask) {
+                                           uint16_t hopMask,
+                                           const uint8_t* bssid,
+                                           const uint8_t* client,
+                                           int8_t rssiMin) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return false;
 
     _detectorControlStart = start;
@@ -1776,6 +1787,11 @@ bool MeshManager::beginDistributedDetector(bool start, uint8_t mode,
     _detectorControlDetectorWindowMs = detectorWindowMs;
     _detectorControlHopDwellMs = hopDwellMs;
     _detectorControlHopMask = hopMask;
+    _detectorControlHasBssid = (bssid != nullptr);
+    if (bssid) memcpy(_detectorControlBssid, bssid, 6);
+    _detectorControlHasClient = (client != nullptr);
+    if (client) memcpy(_detectorControlClient, client, 6);
+    _detectorControlRssiMin = (int8_t)constrain((int)rssiMin, -127, 0);
     _detectorControlRetriesLeft = 5;
     _detectorControlNextSendMs = 0;
     _detectorControlPending = true;
@@ -1825,9 +1841,28 @@ void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
     if (detectorWindowMs < 300 || detectorWindowMs > 2500) return;
     if (meshWindowMs < 2000 || meshWindowMs > 10000) return;
     if (hopDwellMs < 200 || hopDwellMs > 1000) return;
+
+    bool hasBssid = false;
+    bool hasClient = false;
+    uint8_t bssid[6] = {0};
+    uint8_t client[6] = {0};
+    int8_t rssiMin = -127;
+    if (len >= 25) {
+        const uint8_t flags = data[11];
+        hasBssid = (flags & 0x01) != 0;
+        hasClient = (flags & 0x02) != 0;
+        if (hasBssid) memcpy(bssid, data + 12, 6);
+        if (hasClient) memcpy(client, data + 18, 6);
+        rssiMin = (int8_t)data[24];
+        if (rssiMin > 0) rssiMin = 0;
+    }
+
     if (_detectorControlCallback) {
         _detectorControlCallback(start, mode, channel, meshWindowMs,
-                                 detectorWindowMs, hopDwellMs, hopMask);
+                                 detectorWindowMs, hopDwellMs, hopMask,
+                                 hasBssid ? bssid : nullptr,
+                                 hasClient ? client : nullptr,
+                                 rssiMin);
     }
 }
 

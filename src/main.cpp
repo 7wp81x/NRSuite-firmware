@@ -76,6 +76,11 @@ static uint16_t gDistMeshWindowMs = DIST_DEFAULT_MESH_WINDOW_MS;
 static uint16_t gDistDetectorWindowMs = DIST_DEFAULT_DETECTOR_WINDOW_MS;
 static uint16_t gDistHopDwellMs = DIST_DEFAULT_HOP_DWELL_MS;
 static uint16_t gDistHopMask = 0;
+static bool     gDistHasBssid = false;
+static uint8_t  gDistBssid[6] = {0};
+static bool     gDistHasClient = false;
+static uint8_t  gDistClient[6] = {0};
+static int8_t   gDistRssiMin = -127;
 static bool     gDistDetectorWindowActive = false;
 static uint32_t gDistNextSwitchMs = 0;
 static uint8_t  gDistHopChannel = 1;
@@ -125,7 +130,10 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
                                           uint16_t meshWindowMs,
                                           uint16_t detectorWindowMs,
                                           uint16_t hopDwellMs,
-                                          uint16_t hopMask) {
+                                          uint16_t hopMask,
+                                          const uint8_t* bssid,
+                                          const uint8_t* client,
+                                          int8_t rssiMin) {
     if (!detectorNodeIsMaster() && !detectorNodeIsClient()) return;
 
     gDistMode = mode;
@@ -134,6 +142,11 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
     gDistDetectorWindowMs = detectorWindowMs;
     gDistHopDwellMs = hopDwellMs;
     gDistHopMask = hopMask;
+    gDistHasBssid = (bssid != nullptr);
+    if (bssid) memcpy(gDistBssid, bssid, 6);
+    gDistHasClient = (client != nullptr);
+    if (client) memcpy(gDistClient, client, 6);
+    gDistRssiMin = (int8_t)constrain((int)rssiMin, -127, 0);
 
     deauthDetector.setExternalRadio(true);
 
@@ -141,6 +154,11 @@ static void startDistributedDetectorLocal(uint8_t mode, uint8_t channel,
     cfg.hop = (mode == DIST_MODE_HOP);
     cfg.channel = (mode == DIST_MODE_SAME_CHANNEL) ? mesh.currentChannel() : channel;
     cfg.intervalMs = hopDwellMs;
+    cfg.hasBssid = gDistHasBssid;
+    if (gDistHasBssid) memcpy(cfg.bssid, gDistBssid, 6);
+    cfg.hasClient = gDistHasClient;
+    if (gDistHasClient) memcpy(cfg.client, gDistClient, 6);
+    cfg.rssiMin = gDistRssiMin;
     if (!deauthDetector.start(cfg)) {
         deauthDetector.setExternalRadio(false);
         gDistLocalActive = false;
@@ -174,6 +192,9 @@ static void stopDistributedDetectorLocal() {
     gDistNextSwitchMs = 0;
     gDistPendingStart = false;
     gDistPendingStop = false;
+    gDistHasBssid = false;
+    gDistHasClient = false;
+    gDistRssiMin = -127;
 }
 
 static void abortDistributedDetectorForRadioStop() {
@@ -190,8 +211,17 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
                                                uint16_t meshWindowMs,
                                                uint16_t detectorWindowMs,
                                                uint16_t hopDwellMs,
-                                               uint16_t hopMask) {
+                                               uint16_t hopMask,
+                                               const uint8_t* bssid,
+                                               const uint8_t* client,
+                                               int8_t rssiMin) {
     if (start) {
+        const bool sameBssid =
+            (bssid != nullptr) == gDistHasBssid &&
+            (!bssid || memcmp(bssid, gDistBssid, 6) == 0);
+        const bool sameClient =
+            (client != nullptr) == gDistHasClient &&
+            (!client || memcmp(client, gDistClient, 6) == 0);
         const bool sameConfig =
             gDistConfigInitialized &&
             gDistMode == mode &&
@@ -199,7 +229,10 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
             gDistMeshWindowMs == meshWindowMs &&
             gDistDetectorWindowMs == detectorWindowMs &&
             gDistHopDwellMs == hopDwellMs &&
-            gDistHopMask == hopMask;
+            gDistHopMask == hopMask &&
+            sameBssid &&
+            sameClient &&
+            gDistRssiMin == rssiMin;
         if (sameConfig && (gDistLocalActive || gDistPendingStart)) {
             return;  // repeated start control is idempotent
         }
@@ -210,6 +243,11 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
         gDistDetectorWindowMs = detectorWindowMs;
         gDistHopDwellMs = hopDwellMs;
         gDistHopMask = hopMask;
+        gDistHasBssid = (bssid != nullptr);
+        if (bssid) memcpy(gDistBssid, bssid, 6);
+        gDistHasClient = (client != nullptr);
+        if (client) memcpy(gDistClient, client, 6);
+        gDistRssiMin = (int8_t)constrain((int)rssiMin, -127, 0);
         gDistPendingStart = true;
         gDistPendingStop = false;
     } else {
@@ -296,7 +334,10 @@ static void updateDistributedDetectorScheduler() {
         }
         startDistributedDetectorLocal(gDistMode, gDistChannel, gDistMeshWindowMs,
                                       gDistDetectorWindowMs, gDistHopDwellMs,
-                                      gDistHopMask);
+                                      gDistHopMask,
+                                      gDistHasBssid ? gDistBssid : nullptr,
+                                      gDistHasClient ? gDistClient : nullptr,
+                                      gDistRssiMin);
     }
 
     if (!gDistLocalActive) return;
@@ -940,9 +981,21 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             hopDwellMs = (uint16_t)constrain((int)hopDwellMs, 200, 1000);
             hopMask &= 0x1FFF;
 
+            uint8_t targetBssid[6];
+            uint8_t targetClient[6];
+            const bool hasTargetBssid =
+                parseMac(doc["args"]["bssid"] | "", targetBssid);
+            const bool hasTargetClient =
+                parseMac(doc["args"]["client"] | "", targetClient);
+            int8_t targetRssiMin =
+                (int8_t)constrain((int)(doc["args"]["rssi_min"] | -127), -127, 0);
+
             if (!mesh.beginDistributedDetector(true, distMode, requestedChannel,
                                                meshWindowMs, detectorWindowMs,
-                                               hopDwellMs, hopMask)) {
+                                               hopDwellMs, hopMask,
+                                               hasTargetBssid ? targetBssid : nullptr,
+                                               hasTargetClient ? targetClient : nullptr,
+                                               targetRssiMin)) {
                 proto.sendResp(id, false, "mesh not active");
                 return;
             }
@@ -959,9 +1012,17 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             if (masterScans) {
                 startDistributedDetectorLocal(distMode, requestedChannel,
                                               meshWindowMs, detectorWindowMs,
-                                              hopDwellMs, hopMask);
+                                              hopDwellMs, hopMask,
+                                              hasTargetBssid ? targetBssid : nullptr,
+                                              hasTargetClient ? targetClient : nullptr,
+                                              targetRssiMin);
             } else {
                 gDistLocalActive = false;
+                gDistHasBssid = hasTargetBssid;
+                if (hasTargetBssid) memcpy(gDistBssid, targetBssid, 6);
+                gDistHasClient = hasTargetClient;
+                if (hasTargetClient) memcpy(gDistClient, targetClient, 6);
+                gDistRssiMin = targetRssiMin;
             }
 
             JsonDocument resp;

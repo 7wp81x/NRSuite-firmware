@@ -29,7 +29,10 @@ public:
                                              uint16_t meshWindowMs,
                                              uint16_t detectorWindowMs,
                                              uint16_t hopDwellMs,
-                                             uint16_t hopMask);
+                                             uint16_t hopMask,
+                                             const uint8_t* bssid,
+                                             const uint8_t* client,
+                                             int8_t rssiMin);
 
     using ScanControlCallback = void (*)(bool start, uint8_t mode,
                                          uint8_t channel,
@@ -49,7 +52,10 @@ public:
                                   uint16_t meshWindowMs,
                                   uint16_t detectorWindowMs,
                                   uint16_t hopDwellMs,
-                                  uint16_t hopMask);
+                                  uint16_t hopMask,
+                                  const uint8_t* bssid = nullptr,
+                                  const uint8_t* client = nullptr,
+                                  int8_t rssiMin = -127);
     bool beginDistributedScan(bool start, uint8_t mode, uint8_t channel,
                               uint16_t channelMask, uint16_t dwellMs,
                               uint16_t leaseMs);
@@ -237,6 +243,11 @@ private:
     uint16_t _detectorControlDetectorWindowMs = 1500;
     uint16_t _detectorControlHopDwellMs = 350;
     uint16_t _detectorControlHopMask = 0;
+    bool     _detectorControlHasBssid = false;
+    uint8_t  _detectorControlBssid[6] = {0};
+    bool     _detectorControlHasClient = false;
+    uint8_t  _detectorControlClient[6] = {0};
+    int8_t   _detectorControlRssiMin = -127;
     uint8_t  _detectorControlRetriesLeft = 0;
     uint32_t _detectorControlNextSendMs = 0;
 
