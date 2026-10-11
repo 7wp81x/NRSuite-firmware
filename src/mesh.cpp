@@ -1825,6 +1825,11 @@ bool MeshManager::beginDistributedScan(bool start, uint8_t channel,
     _scanControlNextSendMs = 0;
     _scanControlPending = true;
     sendScanControl(_scanControlStart, _scanControlChannel, _scanControlDwellMs);
+    // The master also scans in the same-channel pass; clients receive the
+    // control packet above and scan locally through the callback.
+    if (_scanControlCallback) {
+        _scanControlCallback(start, _scanControlChannel, _scanControlDwellMs);
+    }
     return true;
 }
 
@@ -1893,7 +1898,8 @@ bool MeshManager::enqueueScanReport(const uint8_t bssid[6], const char* ssid,
                                     uint8_t channel, int8_t rssi,
                                     uint8_t authMode, bool wps) {
     if (!bssid || channel < 1 || channel > 13) return false;
-    if (!_espNowActive || _role != ROLE_CLIENT || _sessionId == 0) return false;
+    if (!_espNowActive || _sessionId == 0) return false;
+    if (_role != ROLE_CLIENT && _role != ROLE_MASTER) return false;
 
     size_t ssidLen = 0;
     if (ssid && ssid[0]) {
@@ -1911,6 +1917,23 @@ bool MeshManager::enqueueScanReport(const uint8_t bssid[6], const char* ssid,
     memcpy(payload + 4, bssid, 6);
     payload[10] = (uint8_t)ssidLen;
     if (ssidLen > 0) memcpy(payload + 11, ssid, ssidLen);
+
+    if (_role == ROLE_MASTER) {
+        PeerEntry self = {};
+        self.used = true;
+        self.nodeHash = _nodeHash;
+        self.bootId = _bootId;
+        self.sessionId = _sessionId;
+        self.lastSeenMs = millis();
+        self.role = ROLE_MASTER;
+        self.lastRssi = 0;
+        strncpy(self.nodeId, _nodeId, sizeof(self.nodeId) - 1);
+        strncpy(self.chip, _chipName, sizeof(self.chip) - 1);
+        sendSensorReportEvent(self, REPORT_KIND_SCAN, payload, payloadLen, 0,
+                              nextSensorSeq());
+        return true;
+    }
+
     return enqueueSensorReport(REPORT_KIND_SCAN, payload, payloadLen, false);
 }
 
