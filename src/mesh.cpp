@@ -67,6 +67,7 @@ void MeshManager::update() {
 
     if (_role == ROLE_MASTER) {
         sweepDetectorControl(now);
+        sweepScanControl(now);
     }
 
     // A client detector window owns the radio. Do not let mesh heartbeats,
@@ -314,6 +315,10 @@ void MeshManager::stop() {
     _detectorControlPending = false;
     _detectorControlRetriesLeft = 0;
     _detectorControlNextSendMs = 0;
+    _scanControlPending = false;
+    _scanControlStart = false;
+    _scanControlRetriesLeft = 0;
+    _scanControlNextSendMs = 0;
     stopRadio();
     _role = ROLE_DISABLED;
     _sessionId = 0;
@@ -646,6 +651,34 @@ void MeshManager::handleCommand(uint8_t id, JsonDocument& doc) {
         return;
     }
 
+    if (strcmp(cmd, "MESH_SCAN_START") == 0) {
+        const uint8_t channel = args["channel"] | _channel;
+        const uint16_t dwellMs = args["dwell_ms"] | 300;
+        if (channel < 1 || channel > 13) {
+            sendResp(id, false, "channel must be 1-13");
+            return;
+        }
+        if (dwellMs < 100 || dwellMs > 2000) {
+            sendResp(id, false, "dwell_ms must be 100-2000");
+            return;
+        }
+        if (!beginDistributedScan(true, channel, dwellMs)) {
+            sendResp(id, false, "mesh scan requires an active mesh master");
+            return;
+        }
+        sendResp(id, true, "mesh scan started");
+        return;
+    }
+
+    if (strcmp(cmd, "MESH_SCAN_STOP") == 0) {
+        if (!beginDistributedScan(false, _channel, 300)) {
+            sendResp(id, false, "mesh scan requires an active mesh master");
+            return;
+        }
+        sendResp(id, true, "mesh scan stopped");
+        return;
+    }
+
     if (strcmp(cmd, "MESH_SET_CHANNEL") == 0) {
         const uint8_t channel = args["channel"] | 0;
         if (channel < 1 || channel > 13) {
@@ -721,6 +754,10 @@ bool MeshManager::activate() {
     clearSensorQueue();
     _lastHealthMs = 0;
     _lastSensorSendMs = 0;
+    _scanControlPending = false;
+    _scanControlStart = false;
+    _scanControlRetriesLeft = 0;
+    _scanControlNextSendMs = 0;
     sendStatusEvent("candidate");
     return true;
 }
@@ -1007,9 +1044,22 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
         // Re-ACK every join so a client that missed an earlier ACK can lock
         // its channel without waiting for the next join interval.
         sendJoinAck(nodeHash);
-        // If a distributed detector is already running, make the new client
-        // join it too. Existing clients treat repeated controls as idempotent.
+        // If a distributed detector or scan is already running, make the new
+        // client join it too. Existing clients treat repeated controls as
+        // idempotent.
         sendActiveDetectorControl();
+        sendActiveScanControl();
+        return;
+    }
+
+    if (type == PKT_SCAN_CONTROL) {
+        if (role != ROLE_MASTER || sessionId != _sessionId) return;
+        bool firstSeen = false;
+        if (!authenticateAndTrack(nodeHash, bootId, sessionId, counter, nodeId,
+                                  chip, role, rssi, &firstSeen)) {
+            return;
+        }
+        handleScanControl(payloadData, payloadLen);
         return;
     }
 
@@ -1045,6 +1095,7 @@ void MeshManager::handlePacket(const uint8_t* srcMac, const uint8_t* data, int l
             // this ACK; normally the JOIN path already ACKed it.
             sendJoinAck(nodeHash);
             sendActiveDetectorControl();
+            sendActiveScanControl();
         }
 
         const uint8_t kind = payloadData[0];
@@ -1134,7 +1185,7 @@ bool MeshManager::decodePacket(const uint8_t* data, int len, uint8_t* type,
     if (ptype != PKT_HEARTBEAT && ptype != PKT_JOIN && ptype != PKT_LEAVE &&
         ptype != PKT_CHANNEL_SWITCH && ptype != PKT_SENSOR_REPORT &&
         ptype != PKT_DETECTOR_CONTROL && ptype != PKT_CHANNEL_SWITCH_ACK &&
-        ptype != PKT_JOIN_ACK) return false;
+        ptype != PKT_JOIN_ACK && ptype != PKT_SCAN_CONTROL) return false;
 
     const uint32_t psession = readU32(data + 4);
     const uint32_t pcounter = readU32(data + 8);
@@ -1506,6 +1557,7 @@ const char* MeshManager::reportKindName(uint8_t kind) {
     switch (kind) {
         case REPORT_KIND_NODE_HEALTH: return "node_health";
         case REPORT_KIND_DEAUTH:      return "deauth";
+        case REPORT_KIND_SCAN:        return "scan";
         default:                      return "unknown";
     }
 }
@@ -1544,6 +1596,20 @@ void MeshManager::sendSensorReportEvent(const PeerEntry& peer, uint8_t kind,
         doc["rssi"] = (int8_t)data[3];
         doc["source"] = source;
         doc["target"] = target;
+    } else if (kind == REPORT_KIND_SCAN && len >= 11) {
+        char bssid[18];
+        snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 data[4], data[5], data[6], data[7], data[8], data[9]);
+        const size_t ssidLen = min((size_t)data[10], min((size_t)32, len - 11));
+        char ssid[33] = {0};
+        if (ssidLen > 0) memcpy(ssid, data + 11, ssidLen);
+        ssid[ssidLen] = '\0';
+        doc["bssid"] = bssid;
+        doc["ssid"] = ssid;
+        doc["channel"] = data[0];
+        doc["rssi"] = (int8_t)data[1];
+        doc["auth_mode"] = data[2];
+        doc["wps"] = data[3] != 0;
     } else if (len > 0 && data) {
         char encoded[192];
         if (base64Encode(data, len, encoded, sizeof(encoded))) {
@@ -1743,6 +1809,109 @@ void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
         _detectorControlCallback(start, mode, channel, meshWindowMs,
                                  detectorWindowMs, hopDwellMs, hopMask);
     }
+}
+
+
+bool MeshManager::beginDistributedScan(bool start, uint8_t channel,
+                                       uint16_t dwellMs) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return false;
+    if (channel < 1 || channel > 13) return false;
+    if (dwellMs < 100 || dwellMs > 2000) return false;
+
+    _scanControlStart = start;
+    _scanControlChannel = channel;
+    _scanControlDwellMs = dwellMs;
+    _scanControlRetriesLeft = start ? 5 : 3;
+    _scanControlNextSendMs = 0;
+    _scanControlPending = true;
+    sendScanControl(_scanControlStart, _scanControlChannel, _scanControlDwellMs);
+    return true;
+}
+
+void MeshManager::sendScanControl(bool start, uint8_t channel, uint16_t dwellMs) {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+    if (channel < 1 || channel > 13) return;
+
+    uint8_t payload[4];
+    payload[0] = start ? 1 : 0;
+    payload[1] = channel;
+    payload[2] = (uint8_t)(dwellMs & 0xFF);
+    payload[3] = (uint8_t)((dwellMs >> 8) & 0xFF);
+
+    _counter++;
+    if (_counter == 0) _counter = 1;
+    _seq++;
+
+    uint8_t packet[MAX_PACKET_LEN];
+    size_t packetLen = 0;
+    if (!encryptPacket(PKT_SCAN_CONTROL, ROLE_MASTER, _sessionId, _counter,
+                       millis(), _seq, 0, payload, sizeof(payload),
+                       packet, sizeof(packet), &packetLen)) {
+        sendError("encrypt", "scan control encode failed");
+        return;
+    }
+    esp_now_send(BROADCAST_MAC, packet, packetLen);
+}
+
+void MeshManager::sendActiveScanControl() {
+    if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
+    if (!_scanControlStart) return;
+    sendScanControl(true, _scanControlChannel, _scanControlDwellMs);
+}
+
+void MeshManager::handleScanControl(const uint8_t* data, size_t len) {
+    if (!data || len < 4) return;
+    const bool start = data[0] != 0;
+    const uint8_t channel = data[1];
+    const uint16_t dwellMs = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    if (channel < 1 || channel > 13) return;
+    if (dwellMs < 100 || dwellMs > 2000) return;
+    if (_scanControlCallback) {
+        _scanControlCallback(start, channel, dwellMs);
+    }
+}
+
+void MeshManager::sweepScanControl(uint32_t now) {
+    if (!_scanControlPending) return;
+    if (_role != ROLE_MASTER || !_espNowActive || _sessionId == 0) {
+        _scanControlPending = false;
+        return;
+    }
+    if (_scanControlNextSendMs != 0 && now < _scanControlNextSendMs) return;
+
+    sendScanControl(_scanControlStart, _scanControlChannel, _scanControlDwellMs);
+    if (_scanControlRetriesLeft > 0) _scanControlRetriesLeft--;
+    if (_scanControlRetriesLeft == 0) {
+        _scanControlPending = false;
+        _scanControlNextSendMs = 0;
+    } else {
+        _scanControlNextSendMs = now + 700;
+    }
+}
+
+bool MeshManager::enqueueScanReport(const uint8_t bssid[6], const char* ssid,
+                                    uint8_t channel, int8_t rssi,
+                                    uint8_t authMode, bool wps) {
+    if (!bssid || channel < 1 || channel > 13) return false;
+    if (!_espNowActive || _role != ROLE_CLIENT || _sessionId == 0) return false;
+
+    size_t ssidLen = 0;
+    if (ssid && ssid[0]) {
+        ssidLen = strlen(ssid);
+        if (ssidLen > 32) ssidLen = 32;
+    }
+    const size_t payloadLen = 11 + ssidLen;
+    if (payloadLen > MAX_SENSOR_DATA_LEN) return false;
+
+    uint8_t payload[MAX_SENSOR_DATA_LEN] = {0};
+    payload[0] = channel;
+    payload[1] = (uint8_t)rssi;
+    payload[2] = authMode;
+    payload[3] = wps ? 1 : 0;
+    memcpy(payload + 4, bssid, 6);
+    payload[10] = (uint8_t)ssidLen;
+    if (ssidLen > 0) memcpy(payload + 11, ssid, ssidLen);
+    return enqueueSensorReport(REPORT_KIND_SCAN, payload, payloadLen, false);
 }
 
 // ── USB event helpers ────────────────────────────────────────────────────────

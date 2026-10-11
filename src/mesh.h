@@ -31,8 +31,15 @@ public:
                                              uint16_t hopDwellMs,
                                              uint16_t hopMask);
 
+    using ScanControlCallback = void (*)(bool start, uint8_t channel,
+                                         uint16_t dwellMs);
+
     void setDetectorControlCallback(DetectorControlCallback cb) {
         _detectorControlCallback = cb;
+    }
+
+    void setScanControlCallback(ScanControlCallback cb) {
+        _scanControlCallback = cb;
     }
 
     bool beginDistributedDetector(bool start, uint8_t mode, uint8_t channel,
@@ -40,6 +47,10 @@ public:
                                   uint16_t detectorWindowMs,
                                   uint16_t hopDwellMs,
                                   uint16_t hopMask);
+    bool beginDistributedScan(bool start, uint8_t channel, uint16_t dwellMs);
+    bool enqueueScanReport(const uint8_t bssid[6], const char* ssid,
+                           uint8_t channel, int8_t rssi, uint8_t authMode,
+                           bool wps);
     // Detector-window radio ownership. MeshManager owns the radio while the
     // detector window is active; the scheduler calls these hooks rather than
     // touching esp_wifi_set_channel/promiscuous directly.
@@ -89,9 +100,11 @@ private:
     static const uint8_t  PKT_DETECTOR_CONTROL = 6;
     static const uint8_t  PKT_CHANNEL_SWITCH_ACK = 7;
     static const uint8_t  PKT_JOIN_ACK = 8;
+    static const uint8_t  PKT_SCAN_CONTROL = 9;
 
     static const uint8_t  REPORT_KIND_NODE_HEALTH = 1;
     static const uint8_t  REPORT_KIND_DEAUTH      = 2;
+    static const uint8_t  REPORT_KIND_SCAN        = 3;
 
     static const size_t   HEADER_LEN    = 20;  // version,type,rsvd,session,counter,nodeHash,bootId
     static const size_t   TAG_LEN       = 16;  // AES-CCM tag
@@ -199,6 +212,13 @@ private:
     DetectorControlCallback _detectorControlCallback = nullptr;
     bool     _detectorWindowActive = false;   // true while mesh updates are paused
     bool     _detectorRadioActive = false;    // true whenever promiscuous RX is on
+    ScanControlCallback _scanControlCallback = nullptr;
+    bool     _scanControlPending = false;
+    bool     _scanControlStart = false;
+    uint8_t  _scanControlChannel = 1;
+    uint16_t _scanControlDwellMs = 300;
+    uint8_t  _scanControlRetriesLeft = 0;
+    uint32_t _scanControlNextSendMs = 0;
     bool     _detectorControlPending = false;
     bool     _detectorControlStart = false;
     uint8_t  _detectorControlMode = 1;  // 0=same_channel, 1=fixed, 2=hop
@@ -279,6 +299,10 @@ private:
     void sendActiveDetectorControl();
     void handleDetectorControl(const uint8_t* data, size_t len);
     void sweepDetectorControl(uint32_t now);
+    void sendScanControl(bool start, uint8_t channel, uint16_t dwellMs);
+    void sendActiveScanControl();
+    void handleScanControl(const uint8_t* data, size_t len);
+    void sweepScanControl(uint32_t now);
 
     void sendResp(uint8_t id, bool ok, const char* msg = nullptr);
     void sendStatusEvent(const char* reason = nullptr);

@@ -81,6 +81,14 @@ static uint32_t gDistNextSwitchMs = 0;
 static uint8_t  gDistHopChannel = 1;
 static uint32_t gDistLastHopMs = 0;
 
+static bool     gMeshScanPendingStart = false;
+static bool     gMeshScanPendingStop = false;
+static bool     gMeshScanActive = false;
+static uint8_t  gMeshScanChannel = 1;
+static uint16_t gMeshScanDwellMs = 300;
+
+static bool mesh_scan_channel(uint8_t channel, uint16_t dwellMs);
+
 static bool detectorNodeIsMaster() {
     return strcmp(mesh.roleName(), "master") == 0;
 }
@@ -208,6 +216,33 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
         gDistConfigInitialized = false;
         gDistPendingStop = true;
     }
+}
+
+static void meshScanControlCallback(bool start, uint8_t channel,
+                                    uint16_t dwellMs) {
+    if (start) {
+        gMeshScanChannel = channel;
+        gMeshScanDwellMs = dwellMs;
+        gMeshScanPendingStart = true;
+        gMeshScanPendingStop = false;
+    } else {
+        gMeshScanPendingStop = true;
+        gMeshScanPendingStart = false;
+    }
+}
+
+static void updateMeshScanScheduler() {
+    if (gMeshScanPendingStop) {
+        gMeshScanPendingStop = false;
+        gMeshScanActive = false;
+        return;
+    }
+    if (!gMeshScanPendingStart) return;
+
+    gMeshScanPendingStart = false;
+    gMeshScanActive = true;
+    mesh_scan_channel(gMeshScanChannel, gMeshScanDwellMs);
+    gMeshScanActive = false;
 }
 
 static void updateDistributedDetectorScheduler() {
@@ -346,6 +381,61 @@ static int idf_scan_networks(BridgeProtocol& proto) {
     uint16_t count = 0;
     esp_wifi_scan_get_ap_num(&count);
     return (int)count;
+}
+
+static bool mesh_scan_channel(uint8_t channel, uint16_t dwellMs) {
+    if (channel < 1 || channel > 13) return false;
+    if (!mesh.active()) return false;
+
+    wifi_scan_config_t cfg = {};
+    cfg.ssid        = nullptr;
+    cfg.bssid       = nullptr;
+    cfg.channel     = channel;
+    cfg.show_hidden = true;
+    cfg.scan_type   = WIFI_SCAN_TYPE_ACTIVE;
+    cfg.scan_time.active.min = 100;
+    cfg.scan_time.active.max = (uint16_t)constrain((int)dwellMs, 100, 500);
+
+    _scanDone = false;
+    WiFi.onEvent(wifiEventHandler);
+
+    const esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    const uint32_t deadline = millis() + 4000;
+    while (!_scanDone && millis() < deadline) {
+        proto.update();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!_scanDone) {
+        esp_wifi_scan_stop();
+        return false;
+    }
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    if (count > 0) {
+        wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
+            count * sizeof(wifi_ap_record_t));
+        uint16_t received = count;
+        if (records &&
+            esp_wifi_scan_get_ap_records(&received, records) == ESP_OK) {
+            for (uint16_t i = 0; i < received; i++) {
+                mesh.enqueueScanReport(
+                    records[i].bssid,
+                    (const char*)records[i].ssid,
+                    records[i].primary,
+                    records[i].rssi,
+                    (uint8_t)records[i].authmode,
+                    records[i].wps != 0);
+            }
+        }
+        free(records);
+    }
+    esp_wifi_scan_stop();
+    return true;
 }
 
 static bool parseMac(const char* str, uint8_t out[6]) {
@@ -1639,6 +1729,7 @@ void setup() {
         mesh.enqueueDeauthReport(reason, channel, rssi, source, target);
     });
     mesh.setDetectorControlCallback(distributedDetectorControlCallback);
+    mesh.setScanControlCallback(meshScanControlCallback);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -1656,6 +1747,7 @@ void loop() {
     portal.update();
     beacon.update();
     updateDistributedDetectorScheduler();
+    updateMeshScanScheduler();
     deauthDetector.update();
     hiddenApDetector.update();
     mesh.update();
