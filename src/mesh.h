@@ -31,8 +31,11 @@ public:
                                              uint16_t hopDwellMs,
                                              uint16_t hopMask);
 
-    using ScanControlCallback = void (*)(bool start, uint8_t channel,
-                                         uint16_t dwellMs);
+    using ScanControlCallback = void (*)(bool start, uint8_t mode,
+                                         uint8_t channel,
+                                         uint16_t channelMask,
+                                         uint16_t dwellMs,
+                                         uint16_t leaseMs);
 
     void setDetectorControlCallback(DetectorControlCallback cb) {
         _detectorControlCallback = cb;
@@ -47,7 +50,10 @@ public:
                                   uint16_t detectorWindowMs,
                                   uint16_t hopDwellMs,
                                   uint16_t hopMask);
-    bool beginDistributedScan(bool start, uint8_t channel, uint16_t dwellMs);
+    bool beginDistributedScan(bool start, uint8_t mode, uint8_t channel,
+                              uint16_t channelMask, uint16_t dwellMs,
+                              uint16_t leaseMs);
+    void finishScanLease();
     bool enqueueScanReport(const uint8_t bssid[6], const char* ssid,
                            uint8_t channel, int8_t rssi, uint8_t authMode,
                            bool wps);
@@ -215,10 +221,14 @@ private:
     ScanControlCallback _scanControlCallback = nullptr;
     bool     _scanControlPending = false;
     bool     _scanControlStart = false;
+    uint8_t  _scanControlMode = 0;  // 0=same_channel, 1=multi_channel
     uint8_t  _scanControlChannel = 1;
+    uint16_t _scanControlChannelMask = 0;
     uint16_t _scanControlDwellMs = 300;
+    uint16_t _scanControlLeaseMs = 0;
     uint8_t  _scanControlRetriesLeft = 0;
     uint32_t _scanControlNextSendMs = 0;
+    uint32_t _scanLeaseUntilMs = 0;
     bool     _detectorControlPending = false;
     bool     _detectorControlStart = false;
     uint8_t  _detectorControlMode = 1;  // 0=same_channel, 1=fixed, 2=hop
@@ -299,7 +309,9 @@ private:
     void sendActiveDetectorControl();
     void handleDetectorControl(const uint8_t* data, size_t len);
     void sweepDetectorControl(uint32_t now);
-    void sendScanControl(bool start, uint8_t channel, uint16_t dwellMs);
+    void sendScanControl(bool start, uint8_t mode, uint8_t channel,
+                         uint16_t channelMask, uint16_t dwellMs,
+                         uint16_t leaseMs);
     void sendActiveScanControl();
     void handleScanControl(const uint8_t* data, size_t len);
     void sweepScanControl(uint32_t now);

@@ -84,8 +84,11 @@ static uint32_t gDistLastHopMs = 0;
 static bool     gMeshScanPendingStart = false;
 static bool     gMeshScanPendingStop = false;
 static bool     gMeshScanActive = false;
+static uint8_t  gMeshScanMode = 0;          // 0=same_channel, 1=multi_channel
 static uint8_t  gMeshScanChannel = 1;
+static uint16_t gMeshScanChannelMask = 0;
 static uint16_t gMeshScanDwellMs = 300;
+static uint16_t gMeshScanLeaseMs = 0;
 
 static bool mesh_scan_channel(uint8_t channel, uint16_t dwellMs);
 
@@ -218,11 +221,15 @@ static void distributedDetectorControlCallback(bool start, uint8_t mode,
     }
 }
 
-static void meshScanControlCallback(bool start, uint8_t channel,
-                                    uint16_t dwellMs) {
+static void meshScanControlCallback(bool start, uint8_t mode, uint8_t channel,
+                                    uint16_t channelMask, uint16_t dwellMs,
+                                    uint16_t leaseMs) {
     if (start) {
+        gMeshScanMode = mode;
         gMeshScanChannel = channel;
+        gMeshScanChannelMask = channelMask & 0x1FFF;
         gMeshScanDwellMs = dwellMs;
+        gMeshScanLeaseMs = leaseMs;
         gMeshScanPendingStart = true;
         gMeshScanPendingStop = false;
     } else {
@@ -240,8 +247,24 @@ static void updateMeshScanScheduler() {
     if (!gMeshScanPendingStart) return;
 
     gMeshScanPendingStart = false;
+
+    // Multi-channel scan is client-only: the master stays mesh-always.
+    if (gMeshScanMode == 1 && detectorNodeIsMaster()) {
+        return;
+    }
+
     gMeshScanActive = true;
-    mesh_scan_channel(gMeshScanChannel, gMeshScanDwellMs);
+    if (gMeshScanMode == 1) {
+        for (uint8_t ch = 1; ch <= 13; ch++) {
+            if ((gMeshScanChannelMask & (uint16_t)(1u << (ch - 1))) != 0) {
+                mesh_scan_channel(ch, gMeshScanDwellMs);
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+    } else {
+        mesh_scan_channel(gMeshScanChannel, gMeshScanDwellMs);
+    }
+    mesh.finishScanLease();
     gMeshScanActive = false;
 }
 

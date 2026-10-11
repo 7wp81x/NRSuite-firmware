@@ -253,8 +253,11 @@ void MeshManager::update() {
             _clientHoldChannelUntilMs = now + CHANNEL_SWITCH_HOLD_MS;
             sendStatusEvent("channel_switched");
         }
+        const bool scanLeaseActive =
+            _scanLeaseUntilMs != 0 && now < _scanLeaseUntilMs;
         if (_lastMasterSeenMs != 0 &&
-            now - _lastMasterSeenMs > MASTER_TIMEOUT_MS) {
+            now - _lastMasterSeenMs > MASTER_TIMEOUT_MS &&
+            !scanLeaseActive) {
             if (_clientHoldChannelUntilMs != 0 && now < _clientHoldChannelUntilMs) {
                 // Stay on the committed channel for the hold period and keep
                 // trying to reach the master. Do not start recovery hopping yet.
@@ -319,6 +322,7 @@ void MeshManager::stop() {
     _scanControlStart = false;
     _scanControlRetriesLeft = 0;
     _scanControlNextSendMs = 0;
+    _scanLeaseUntilMs = 0;
     stopRadio();
     _role = ROLE_DISABLED;
     _sessionId = 0;
@@ -652,8 +656,12 @@ void MeshManager::handleCommand(uint8_t id, JsonDocument& doc) {
     }
 
     if (strcmp(cmd, "MESH_SCAN_START") == 0) {
+        const char* modeArg = args["mode"] | "same_channel";
+        const uint8_t mode = (strcmp(modeArg, "multi_channel") == 0) ? 1 : 0;
         const uint8_t channel = args["channel"] | _channel;
+        const uint16_t channelMask = args["channel_mask"] | 0;
         const uint16_t dwellMs = args["dwell_ms"] | 300;
+        const uint16_t leaseMs = args["lease_ms"] | 0;
         if (channel < 1 || channel > 13) {
             sendResp(id, false, "channel must be 1-13");
             return;
@@ -662,7 +670,12 @@ void MeshManager::handleCommand(uint8_t id, JsonDocument& doc) {
             sendResp(id, false, "dwell_ms must be 100-2000");
             return;
         }
-        if (!beginDistributedScan(true, channel, dwellMs)) {
+        if (mode == 1 && (channelMask & 0x1FFF) == 0) {
+            sendResp(id, false, "multi_channel requires channel_mask");
+            return;
+        }
+        if (!beginDistributedScan(true, mode, channel, channelMask, dwellMs,
+                                  leaseMs)) {
             sendResp(id, false, "mesh scan requires an active mesh master");
             return;
         }
@@ -671,7 +684,7 @@ void MeshManager::handleCommand(uint8_t id, JsonDocument& doc) {
     }
 
     if (strcmp(cmd, "MESH_SCAN_STOP") == 0) {
-        if (!beginDistributedScan(false, _channel, 300)) {
+        if (!beginDistributedScan(false, 0, _channel, 0, 300, 0)) {
             sendResp(id, false, "mesh scan requires an active mesh master");
             return;
         }
@@ -758,6 +771,7 @@ bool MeshManager::activate() {
     _scanControlStart = false;
     _scanControlRetriesLeft = 0;
     _scanControlNextSendMs = 0;
+    _scanLeaseUntilMs = 0;
     sendStatusEvent("candidate");
     return true;
 }
@@ -1812,36 +1826,59 @@ void MeshManager::handleDetectorControl(const uint8_t* data, size_t len) {
 }
 
 
-bool MeshManager::beginDistributedScan(bool start, uint8_t channel,
-                                       uint16_t dwellMs) {
+bool MeshManager::beginDistributedScan(bool start, uint8_t mode,
+                                       uint8_t channel,
+                                       uint16_t channelMask,
+                                       uint16_t dwellMs,
+                                       uint16_t leaseMs) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return false;
+    if (mode > 1) return false;
     if (channel < 1 || channel > 13) return false;
     if (dwellMs < 100 || dwellMs > 2000) return false;
+    if (leaseMs > 60000) return false;
+    if (mode == 1 && channelMask == 0) return false;
 
     _scanControlStart = start;
+    _scanControlMode = mode;
     _scanControlChannel = channel;
+    _scanControlChannelMask = channelMask & 0x1FFF;
     _scanControlDwellMs = dwellMs;
+    _scanControlLeaseMs = leaseMs;
     _scanControlRetriesLeft = start ? 5 : 3;
     _scanControlNextSendMs = 0;
     _scanControlPending = true;
-    sendScanControl(_scanControlStart, _scanControlChannel, _scanControlDwellMs);
-    // The master also scans in the same-channel pass; clients receive the
-    // control packet above and scan locally through the callback.
+    sendScanControl(_scanControlStart, _scanControlMode, _scanControlChannel,
+                    _scanControlChannelMask, _scanControlDwellMs,
+                    _scanControlLeaseMs);
+    // Master-side callback: same-channel mode includes the master; multi-channel
+    // mode is client-only so the master can stay mesh-always.
     if (_scanControlCallback) {
-        _scanControlCallback(start, _scanControlChannel, _scanControlDwellMs);
+        _scanControlCallback(start, _scanControlMode, _scanControlChannel,
+                             _scanControlChannelMask, _scanControlDwellMs,
+                             _scanControlLeaseMs);
     }
     return true;
 }
 
-void MeshManager::sendScanControl(bool start, uint8_t channel, uint16_t dwellMs) {
+void MeshManager::sendScanControl(bool start, uint8_t mode, uint8_t channel,
+                                  uint16_t channelMask, uint16_t dwellMs,
+                                  uint16_t leaseMs) {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
     if (channel < 1 || channel > 13) return;
 
-    uint8_t payload[4];
+    // Keep the original first four bytes for older clients:
+    //   start, channel, dwell_ms
+    // Then append v2 fields.
+    uint8_t payload[9];
     payload[0] = start ? 1 : 0;
     payload[1] = channel;
     payload[2] = (uint8_t)(dwellMs & 0xFF);
     payload[3] = (uint8_t)((dwellMs >> 8) & 0xFF);
+    payload[4] = mode;
+    payload[5] = (uint8_t)(channelMask & 0xFF);
+    payload[6] = (uint8_t)((channelMask >> 8) & 0xFF);
+    payload[7] = (uint8_t)(leaseMs & 0xFF);
+    payload[8] = (uint8_t)((leaseMs >> 8) & 0xFF);
 
     _counter++;
     if (_counter == 0) _counter = 1;
@@ -1861,7 +1898,9 @@ void MeshManager::sendScanControl(bool start, uint8_t channel, uint16_t dwellMs)
 void MeshManager::sendActiveScanControl() {
     if (!_espNowActive || _role != ROLE_MASTER || _sessionId == 0) return;
     if (!_scanControlStart) return;
-    sendScanControl(true, _scanControlChannel, _scanControlDwellMs);
+    sendScanControl(true, _scanControlMode, _scanControlChannel,
+                    _scanControlChannelMask, _scanControlDwellMs,
+                    _scanControlLeaseMs);
 }
 
 void MeshManager::handleScanControl(const uint8_t* data, size_t len) {
@@ -1869,10 +1908,38 @@ void MeshManager::handleScanControl(const uint8_t* data, size_t len) {
     const bool start = data[0] != 0;
     const uint8_t channel = data[1];
     const uint16_t dwellMs = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    const uint8_t mode = len >= 5 ? data[4] : 0;
+    const uint16_t channelMask = len >= 7
+        ? ((uint16_t)data[5] | ((uint16_t)data[6] << 8))
+        : 0;
+    const uint16_t leaseMs = len >= 9
+        ? ((uint16_t)data[7] | ((uint16_t)data[8] << 8))
+        : 0;
     if (channel < 1 || channel > 13) return;
     if (dwellMs < 100 || dwellMs > 2000) return;
+    if (mode > 1) return;
+
+    if (start && leaseMs > 0) {
+        _scanLeaseUntilMs = millis() + leaseMs;
+    } else if (!start) {
+        _scanLeaseUntilMs = 0;
+    }
     if (_scanControlCallback) {
-        _scanControlCallback(start, channel, dwellMs);
+        _scanControlCallback(start, mode, channel, channelMask & 0x1FFF,
+                             dwellMs, leaseMs);
+    }
+}
+
+void MeshManager::finishScanLease() {
+    _scanLeaseUntilMs = 0;
+    if (_espNowActive) {
+        applyRadioChannel(_channel, "scan_restore");
+    }
+    if (_role == ROLE_CLIENT) {
+        _lastMasterSeenMs = millis();
+        _lastJoinMs = 0;
+        _lastHealthMs = 0;
+        _lastSensorSendMs = 0;
     }
 }
 
@@ -1884,7 +1951,9 @@ void MeshManager::sweepScanControl(uint32_t now) {
     }
     if (_scanControlNextSendMs != 0 && now < _scanControlNextSendMs) return;
 
-    sendScanControl(_scanControlStart, _scanControlChannel, _scanControlDwellMs);
+    sendScanControl(_scanControlStart, _scanControlMode, _scanControlChannel,
+                    _scanControlChannelMask, _scanControlDwellMs,
+                    _scanControlLeaseMs);
     if (_scanControlRetriesLeft > 0) _scanControlRetriesLeft--;
     if (_scanControlRetriesLeft == 0) {
         _scanControlPending = false;
