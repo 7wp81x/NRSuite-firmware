@@ -1,5 +1,8 @@
 #include "FileUpload.h"
 #include "mass_storage.h"
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
+#include "UsbHID.h"
+#endif
 
 namespace {
     uint8_t* _buf     = nullptr;
@@ -66,6 +69,15 @@ bool FileUpload::addChunk(const char* filename, const uint8_t* data, size_t len,
         for (size_t i = 0; i < _len; i++) content += (char)_buf[i];
 
         bool ok = MassStorage::writeFile(_path, content);
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
+        if (ok) {
+            UsbHID::clearScript();
+        } else {
+            // Some S2/S3 images run without a usable msc_ffat partition.
+            // Keep BadUSB functional by storing the DuckyScript in NVS.
+            ok = UsbHID::saveScript(content);
+        }
+#endif
         reset();  // clear accumulator regardless of outcome, ready for next upload
         return ok;
     }
