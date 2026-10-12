@@ -115,7 +115,11 @@ bool PinBruteforce::parseConfig(JsonObject args, String& error) {
     _prefix = String((const char*)(args["prefix"] | ""));
     _suffix = String((const char*)(args["suffix"] | ""));
     _timeoutMs = (uint32_t)(args["timeout_ms"] | 1000);
-    _attemptsBeforeTimeout = (uint16_t)(args["attempts_before_timeout"] | 0);
+    _attemptsBeforeTimeout = (uint16_t)(
+        args["attempts_before_cooldown"] |
+        args["attempts_before_timeout"] |
+        0);
+    _cooldownMs = (uint32_t)(args["cooldown_ms"] | 30000);
     _interAttemptMs = (uint32_t)(args["inter_attempt_ms"] | 400);
     _autoResume = args["auto_resume"] | true;
     _sessionKey = String((const char*)(args["session_key"] | "default"));
@@ -138,6 +142,7 @@ bool PinBruteforce::parseConfig(JsonObject args, String& error) {
     if (_timeoutMs > 60000) _timeoutMs = 60000;
     if (_interAttemptMs > 60000) _interAttemptMs = 60000;
     if (_attemptsBeforeTimeout > 1000) _attemptsBeforeTimeout = 1000;
+    if (_cooldownMs > 600000) _cooldownMs = 600000;
     return true;
 }
 
@@ -584,7 +589,7 @@ void PinBruteforce::update() {
         _attemptsInCycle = 0;
         cooldown = true;
     }
-    _nextAttemptAtMs = now + _timeoutMs + (cooldown ? _timeoutMs : 0) + _interAttemptMs;
+    _nextAttemptAtMs = now + _timeoutMs + (cooldown ? _cooldownMs : 0) + _interAttemptMs;
 
     if ((_attemptsTotal % PERSIST_EVERY_N) == 0 || cooldown) persistSession();
     if (_state == PinBruteforceState::ERROR_STATE) {
@@ -655,7 +660,7 @@ bool PinBruteforce::runIfArmed() {
             cooldown = true;
         }
         delay(_timeoutMs);
-        if (cooldown) delay(_timeoutMs);
+        if (cooldown) delay(_cooldownMs);
         if (_interAttemptMs > 0) delay(_interAttemptMs);
         if ((_attemptsTotal % PERSIST_EVERY_N) == 0 || cooldown) persistSession();
     }
@@ -728,7 +733,9 @@ void PinBruteforce::status(JsonDocument& doc) const {
     doc["prefix"] = _prefix;
     doc["suffix"] = _suffix;
     doc["timeout_ms"] = _timeoutMs;
+    doc["attempts_before_cooldown"] = _attemptsBeforeTimeout;
     doc["attempts_before_timeout"] = _attemptsBeforeTimeout;
+    doc["cooldown_ms"] = _cooldownMs;
     doc["inter_attempt_ms"] = _interAttemptMs;
     doc["auto_resume"] = _autoResume;
     doc["session_key"] = _sessionKey;
@@ -775,6 +782,7 @@ void PinBruteforce::persistSession() {
     prefs.putString("suffix", _suffix);
     prefs.putUInt("timeout", _timeoutMs);
     prefs.putUShort("att_before", _attemptsBeforeTimeout);
+    prefs.putUInt("cooldown", _cooldownMs);
     prefs.putUInt("inter", _interAttemptMs);
     prefs.putBool("auto_resume", _autoResume);
     prefs.putString("wordlist_file", _wordlistFile);
@@ -809,6 +817,7 @@ void PinBruteforce::loadPersistedSession() {
     _suffix = prefs.getString("suffix", "");
     _timeoutMs = prefs.getUInt("timeout", 1000);
     _attemptsBeforeTimeout = prefs.getUShort("att_before", 0);
+    _cooldownMs = prefs.getUInt("cooldown", 30000);
     _interAttemptMs = prefs.getUInt("inter", 400);
     _autoResume = prefs.getBool("auto_resume", true);
     _sessionKey = prefs.getString("session_key", "default");
