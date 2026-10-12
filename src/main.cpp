@@ -8,6 +8,7 @@
 #include "deauth_detector.h"
 #include "hidden_ap.h"
 #include "mesh.h"
+#include "pin_bruteforce.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -150,6 +151,7 @@ static void stopRadioModules() {
 }
 
 static void stopAllModules() {
+    pinBruteforce.stop();
     stopRadioModules();
     #ifdef ENABLE_BLE_HID
         bleProfile.stop();
@@ -235,6 +237,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         #endif
         #if HID_SUPPORTED
             features.add("badusb");
+            features.add("pin_bruteforce");
         #endif
         resp["sniffing"] = sniffer.active();
         resp["client_detecting"] = sniffer.active() && sniffer.clientOnly();
@@ -1153,6 +1156,95 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         #endif
     }
 
+    // ── PIN BRUTEFORCE ───────────────────────────────────────────────────
+    else if (strcmp(cmd, "PIN_RANGE_START") == 0) {
+        String error;
+        if (!pinBruteforce.start(doc["args"], error)) {
+            proto.sendResp(id, false, error.c_str());
+            return;
+        }
+        JsonDocument resp;
+        resp["ok"] = true;
+        pinBruteforce.status(resp);
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "PIN_RANGE_STOP") == 0) {
+        pinBruteforce.stop();
+        JsonDocument resp;
+        resp["ok"] = true;
+        pinBruteforce.status(resp);
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "PIN_RANGE_RESUME") == 0) {
+        String error;
+        if (!pinBruteforce.resume(error)) {
+            proto.sendResp(id, false, error.c_str());
+            return;
+        }
+        JsonDocument resp;
+        resp["ok"] = true;
+        pinBruteforce.status(resp);
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "PIN_RANGE_CLEAR") == 0) {
+        bool clearWordlist = doc["args"]["wordlist"] | false;
+        String error;
+        pinBruteforce.clear(clearWordlist, error);
+        JsonDocument resp;
+        resp["ok"] = true;
+        pinBruteforce.status(resp);
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "PIN_RANGE_STATUS") == 0) {
+        JsonDocument resp;
+        resp["ok"] = true;
+        pinBruteforce.status(resp);
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "PIN_WORDLIST_RESET") == 0) {
+        String error;
+        bool ok = pinBruteforce.beginWordlistUpload(error);
+        proto.sendResp(id, ok, ok ? "wordlist upload ready" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "PIN_WORDLIST_CHUNK") == 0) {
+        const char* b64data = doc["args"]["data"] | (const char*)nullptr;
+        bool last = doc["args"]["last"] | false;
+        if (!b64data) {
+            proto.sendResp(id, false, "missing data");
+            return;
+        }
+        size_t b64len = strlen(b64data);
+        size_t outCap = ((b64len + 3) / 4) * 3 + 2;
+        uint8_t* outBuf = (uint8_t*)heap_caps_malloc(outCap, MALLOC_CAP_8BIT);
+        if (!outBuf) {
+            proto.sendResp(id, false, "oom");
+            return;
+        }
+        size_t outLen = 0;
+        int ret = mbedtls_base64_decode(outBuf, outCap, &outLen,
+                                        (const unsigned char*)b64data, b64len);
+        String error;
+        bool ok = false;
+        if (ret == 0) {
+            ok = pinBruteforce.addWordlistChunk(outBuf, outLen, last, error);
+        } else {
+            error = "decode failed";
+        }
+        heap_caps_free(outBuf);
+        proto.sendResp(id, ok, ok ? (last ? "wordlist saved" : "chunk ok") : error.c_str());
+    }
+
     // ── BEACON SPAM ───────────────────────────────────────────────────────
     else if (strcmp(cmd, "START_BEACON") == 0) {
         radioIdle();  // stop sniff / portal / prior beacon before starting
@@ -1305,6 +1397,7 @@ void setup() {
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
     mesh.begin(proto, getDeviceId().c_str(), CHIP_NAME);
+    pinBruteforce.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -1324,6 +1417,7 @@ void loop() {
     deauthDetector.update();
     hiddenApDetector.update();
     mesh.update();
+    pinBruteforce.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();
