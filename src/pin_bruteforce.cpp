@@ -85,14 +85,11 @@ const char* PinBruteforce::sourceName() const {
 
 bool PinBruteforce::parseConfig(JsonObject args, String& error) {
     const char* modeArg = args["mode"] | "standalone_native_hid";
-    if (strcmp(modeArg, "standalone_native_hid") == 0) {
-        _mode = PinBruteforceMode::STANDALONE_NATIVE_HID;
-    } else if (strcmp(modeArg, "external_ch9329_realtime") == 0) {
-        _mode = PinBruteforceMode::EXTERNAL_CH9329_REALTIME;
-    } else {
-        error = "invalid mode";
+    if (strcmp(modeArg, "standalone_native_hid") != 0) {
+        error = "only standalone_native_hid is supported";
         return false;
     }
+    _mode = PinBruteforceMode::STANDALONE_NATIVE_HID;
 
     const char* sourceArg = args["source"] | "range";
     if (strcmp(sourceArg, "range") == 0) {
