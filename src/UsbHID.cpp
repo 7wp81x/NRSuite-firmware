@@ -25,6 +25,24 @@ bool UsbHID::armScript(const String& filename, bool mscMode) {
     return ok;
 }
 
+bool UsbHID::available() {
+    return true;
+}
+
+void UsbHID::sendText(const String& text) {
+    Keyboard.print(text);
+}
+
+void UsbHID::pressEnter() {
+    Keyboard.press(KEY_RETURN);
+    delay(5);
+    Keyboard.release(KEY_RETURN);
+}
+
+void UsbHID::releaseAll() {
+    Keyboard.releaseAll();
+}
+
 bool UsbHID::runIfArmed() {
     Preferences prefs;
     prefs.begin("boot", false);
