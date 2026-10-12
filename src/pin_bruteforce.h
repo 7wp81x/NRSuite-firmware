@@ -31,6 +31,7 @@ public:
     bool start(JsonObject args, String& error);
     bool resume(String& error);
     bool stop();
+    void disarm();
     bool clear(bool clearWordlist, String& error);
     void status(JsonDocument& doc);
 
@@ -50,7 +51,7 @@ private:
     static constexpr const char* WORDLIST_PATH = "/pin_wordlist.txt";
     static constexpr size_t MAX_WORDLIST_BYTES = 16 * 1024;
     static constexpr size_t MAX_WORDLIST_LINES = 1000;
-    static constexpr uint32_t PERSIST_EVERY_N = 10;
+    static constexpr uint32_t PERSIST_EVERY_N = 1;
 
     BridgeProtocol* _proto = nullptr;
 
