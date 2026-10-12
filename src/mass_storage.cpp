@@ -82,7 +82,20 @@ void MassStorage::setMediaPresent(bool present) {
 // ── File operations (normal firmware mode) ──────────────────────────────
 
 bool MassStorage::writeFile(const char* path, const String& content, bool append) {
-    if (!FFat.begin(true, "/ffat", 10, FAT_LABEL)) return false;
+    if (!FFat.begin(false, "/ffat", 10, FAT_LABEL)) {
+        // Explicit recovery path. Some recovered/minimal images mount but
+        // cannot write until the FAT volume is rebuilt once.
+        Serial.println("[storage] FFat mount failed; rebuilding msc_ffat");
+        FFat.end();
+        if (!FFat.format(FFAT_WIPE_QUICK, (char*)FAT_LABEL)) {
+            Serial.println("[storage] FFat format failed");
+            return false;
+        }
+        if (!FFat.begin(true, "/ffat", 10, FAT_LABEL)) {
+            Serial.println("[storage] FFat remount failed");
+            return false;
+        }
+    }
 
     File f = FFat.open(path, append ? FILE_APPEND : FILE_WRITE);
     if (!f) {

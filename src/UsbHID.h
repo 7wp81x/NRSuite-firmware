@@ -23,6 +23,13 @@ public:
     static void pressEnter();
     static void releaseAll();
 
+    // DuckyScript fallback store used when the FAT/MSC partition is missing
+    // or cannot be written. Keeps BadUSB usable on minimal/flash-recovered
+    // builds without changing the Android upload protocol.
+    static bool saveScript(const String& content);
+    static bool loadScript(String& out);
+    static void clearScript();
+
 private:
     static void runScript(const String& scriptContent);
 };

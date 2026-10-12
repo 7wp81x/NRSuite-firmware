@@ -54,6 +54,58 @@ void UsbHID::releaseAll() {
     Keyboard.releaseAll();
 }
 
+static const char* DUCKY_STORE_NS = "ducky_store";
+static const size_t DUCKY_STORE_CHUNK = 3000;
+
+bool UsbHID::saveScript(const String& content) {
+    Preferences prefs;
+    if (!prefs.begin(DUCKY_STORE_NS, false)) return false;
+    const uint32_t chunks = (content.length() + DUCKY_STORE_CHUNK - 1) / DUCKY_STORE_CHUNK;
+    if (chunks > 64) {
+        prefs.end();
+        return false;
+    }
+    prefs.putUInt("chunks", chunks);
+    for (uint32_t i = 0; i < chunks; i++) {
+        const size_t start = i * DUCKY_STORE_CHUNK;
+        const size_t end = min(start + DUCKY_STORE_CHUNK, content.length());
+        String key = "c" + String(i);
+        prefs.putString(key.c_str(), content.substring(start, end));
+    }
+    prefs.end();
+    return true;
+}
+
+bool UsbHID::loadScript(String& out) {
+    Preferences prefs;
+    if (!prefs.begin(DUCKY_STORE_NS, true)) return false;
+    const uint32_t chunks = prefs.getUInt("chunks", 0);
+    if (chunks == 0 || chunks > 64) {
+        prefs.end();
+        return false;
+    }
+    out = "";
+    for (uint32_t i = 0; i < chunks; i++) {
+        String key = "c" + String(i);
+        String part = prefs.getString(key.c_str(), "");
+        if (part.length() == 0 && i + 1 < chunks) {
+            prefs.end();
+            return false;
+        }
+        out += part;
+    }
+    prefs.end();
+    return out.length() > 0;
+}
+
+void UsbHID::clearScript() {
+    Preferences prefs;
+    if (prefs.begin(DUCKY_STORE_NS, false)) {
+        prefs.clear();
+        prefs.end();
+    }
+}
+
 bool UsbHID::runIfArmed() {
     Preferences prefs;
     prefs.begin("boot", false);
@@ -73,8 +125,11 @@ bool UsbHID::runIfArmed() {
 
     String script;
     if (!MassStorage::readFile(filename.c_str(), script)) {
-        Serial.printf("Failed to read ducky file: %s\n", filename.c_str());
-        return false;
+        if (!loadScript(script)) {
+            Serial.printf("Failed to read ducky file: %s\n", filename.c_str());
+            return false;
+        }
+        Serial.println("Loaded ducky script from NVS fallback store.");
     }
 
     if (duckmscMode) {
