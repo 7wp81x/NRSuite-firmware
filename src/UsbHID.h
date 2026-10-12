@@ -14,6 +14,7 @@ extern USBHIDKeyboard Keyboard;
 class UsbHID {
 public:
     static bool armScript(const String& filename, bool mscMode);
+    static bool disarm();
     static bool runIfArmed();
 
     // Realtime helpers used by the PIN bruteforce module and future HID tools.

@@ -528,6 +528,17 @@ bool PinBruteforce::resume(String& error) {
     return true;
 }
 
+void PinBruteforce::disarm() {
+    // Lightweight mutual-exclusion helper for the BadUSB path. Do not touch
+    // HID state or emit events; only clear the boot-armed flag.
+    _armed = false;
+    if (_state == PinBruteforceState::ARMED) {
+        _state = PinBruteforceState::PAUSED;
+    }
+    _updatedAt = millis();
+    persistSession();
+}
+
 bool PinBruteforce::stop() {
     if (_state == PinBruteforceState::RUNNING || _state == PinBruteforceState::ARMED) {
         _state = PinBruteforceState::PAUSED;

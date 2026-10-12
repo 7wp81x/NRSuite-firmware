@@ -1143,6 +1143,9 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     else if (strcmp(cmd, "START_BADUSB") == 0) {
         #if HID_SUPPORTED
+            // Native HID boot actions are mutually exclusive. Arming BadUSB
+            // disarms any waiting PIN session without touching HID state.
+            pinBruteforce.disarm();
             const char* filename = doc["args"]["filename"] | (const char*)nullptr;
             bool        startMSC = doc["args"]["msc"] | false;
             if (!filename) { proto.sendResp(id, false, "Ducky script is missing!"); return; }
@@ -1158,6 +1161,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── PIN BRUTEFORCE ───────────────────────────────────────────────────
     else if (strcmp(cmd, "PIN_RANGE_START") == 0) {
+        #if HID_SUPPORTED
+            // Native HID boot actions are mutually exclusive. Arming PIN
+            // disarms any waiting BadUSB script.
+            UsbHID::disarm();
+        #endif
         String error;
         if (!pinBruteforce.start(doc["args"], error)) {
             proto.sendResp(id, false, error.c_str());
@@ -1330,11 +1338,12 @@ void setup() {
         if (mscMode) {
             MassStorage::setup();   // USB.begin() called fresh, nothing else has touched USB yet
             while (true) delay(1000);
+        } else if (UsbHID::runIfArmed()) {
+            // BadUSB keeps priority for the native HID boot path.
+            while (true) delay(1500);
         } else if (pinBruteforce.runIfArmed()) {
             // One-shot HID session, like BadUSB. Keep the device in HID mode
             // until the user unplugs/replugs it, then re-arm from the app.
-            while (true) delay(1500);
-        } else if (UsbHID::runIfArmed()) {
             while (true) delay(1500);
         }
         #endif

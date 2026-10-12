@@ -25,6 +25,17 @@ bool UsbHID::armScript(const String& filename, bool mscMode) {
     return ok;
 }
 
+bool UsbHID::disarm() {
+    Preferences prefs;
+    prefs.begin("boot", false);
+    bool armed = prefs.getBool("ducky_mode", false);
+    prefs.putBool("ducky_mode", false);
+    prefs.remove("ducky_file");
+    prefs.remove("duck_mscMode");
+    prefs.end();
+    return armed;
+}
+
 bool UsbHID::available() {
     return true;
 }
