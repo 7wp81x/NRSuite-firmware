@@ -419,18 +419,39 @@ void PinBruteforce::sendCurrentPin() {
 }
 
 bool PinBruteforce::start(JsonObject args, String& error) {
+    const bool hadSession = (_state != PinBruteforceState::IDLE);
+    const String previousKey = _sessionKey;
+    const uint64_t savedStartIndex = _startIndex;
+    const uint64_t savedCurrentIndex = _currentIndex;
+    const uint64_t savedEndIndex = _endIndex;
+    const uint32_t savedAttemptsTotal = _attemptsTotal;
+    const uint32_t savedAttemptsInCycle = _attemptsInCycle;
+    const String savedLastPin = _lastPin;
+    const uint32_t savedStartedAt = _startedAt;
+
     stop();
     resetWordlistUpload();
     if (!parseConfig(args, error)) return false;
     if (!validateConfig(error)) return false;
 
     _standalone = (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID);
-    _attemptsTotal = 0;
-    _attemptsInCycle = 0;
-    _lastPin = "";
+    const bool resumeSaved = hadSession && _autoResume && previousKey == _sessionKey;
+    if (resumeSaved) {
+        _startIndex = savedStartIndex;
+        _currentIndex = savedCurrentIndex;
+        _endIndex = savedEndIndex;
+        _attemptsTotal = savedAttemptsTotal;
+        _attemptsInCycle = savedAttemptsInCycle;
+        _lastPin = savedLastPin;
+        _startedAt = savedStartedAt ? savedStartedAt : millis();
+    } else {
+        _attemptsTotal = 0;
+        _attemptsInCycle = 0;
+        _lastPin = "";
+        _startedAt = millis();
+    }
     _lastError = "";
-    _startedAt = millis();
-    _updatedAt = _startedAt;
+    _updatedAt = millis();
     _nextAttemptAtMs = 0;
 
     if (_standalone) {
@@ -440,6 +461,7 @@ bool PinBruteforce::start(JsonObject args, String& error) {
         return false;
 #else
         _state = PinBruteforceState::ARMED;
+        _armed = true;
         persistSession();
         emitStatus("armed");
         return true;
@@ -499,6 +521,7 @@ bool PinBruteforce::resume(String& error) {
 bool PinBruteforce::stop() {
     if (_state == PinBruteforceState::RUNNING || _state == PinBruteforceState::ARMED) {
         _state = PinBruteforceState::PAUSED;
+        _armed = false;
         _updatedAt = millis();
         stopHid();
         persistSession();
@@ -517,6 +540,7 @@ bool PinBruteforce::clear(bool clearWordlist, String& error) {
     (void)error;
     stop();
     _state = PinBruteforceState::IDLE;
+    _armed = false;
     _attemptsTotal = 0;
     _attemptsInCycle = 0;
     _currentIndex = 0;
@@ -576,25 +600,32 @@ bool PinBruteforce::runIfArmed() {
     return false;
 #else
     loadPersistedSession();
+    if (!_armed) return false;
     if (_mode != PinBruteforceMode::STANDALONE_NATIVE_HID) return false;
     if (_state != PinBruteforceState::ARMED && _state != PinBruteforceState::RUNNING) return false;
-    if (_state == PinBruteforceState::RUNNING && !_autoResume) {
-        _currentIndex = _startIndex;
-        _attemptsTotal = 0;
-        _attemptsInCycle = 0;
-    }
+    // BadUSB-style one-shot: always consume the arming flag before typing
+    // starts. Unplug/replug during a run returns to the normal USB device.
+    // To continue, the app must explicitly re-arm the session.
+    _armed = false;
+    persistSession();
 
     String error;
     if (_source == PinBruteforceSource::WORDLIST && !loadWordlist(error)) {
         _lastError = error;
         _state = PinBruteforceState::ERROR_STATE;
+        persistSession();
         emitError("wordlist", error.c_str());
+        delay(250);
+        ESP.restart();
         return true;
     }
     if (!initHid(error)) {
         _lastError = error;
         _state = PinBruteforceState::ERROR_STATE;
+        persistSession();
         emitError("hid_init", error.c_str());
+        delay(250);
+        ESP.restart();
         return true;
     }
 
@@ -608,6 +639,7 @@ bool PinBruteforce::runIfArmed() {
         String pin;
         if (!nextPin(pin)) {
             _state = PinBruteforceState::DONE;
+            _armed = false;
             _updatedAt = millis();
             persistSession();
             emitDone();
@@ -632,6 +664,13 @@ bool PinBruteforce::runIfArmed() {
     }
 
     stopHid();
+    persistSession();
+    emitStatus("one_shot_complete");
+    delay(250);
+    // Return to the normal USB CDC device automatically after the one-shot
+    // HID run, so the app can reconnect and re-arm without another manual
+    // unplug/replug cycle.
+    ESP.restart();
     return true;
 #endif
 }
@@ -685,6 +724,7 @@ void PinBruteforce::status(JsonDocument& doc) const {
     doc["mode"] = modeName();
     doc["source"] = sourceName();
     doc["standalone"] = _standalone;
+    doc["armed"] = _armed;
     doc["active"] = active();
     doc["pin_length"] = _pinLength;
     doc["charset"] = _charset;
@@ -726,6 +766,7 @@ void PinBruteforce::persistSession() {
     Preferences prefs;
     if (!prefs.begin(NVS_NAMESPACE, false)) return;
     prefs.putString("session_key", _sessionKey);
+    prefs.putBool("armed", _armed);
     prefs.putUChar("mode", (uint8_t)_mode);
     prefs.putUChar("source", (uint8_t)_source);
     prefs.putUChar("state", (uint8_t)_state);
@@ -774,6 +815,7 @@ void PinBruteforce::loadPersistedSession() {
     _interAttemptMs = prefs.getUInt("inter", 400);
     _autoResume = prefs.getBool("auto_resume", true);
     _sessionKey = prefs.getString("session_key", "default");
+    _armed = prefs.getBool("armed", false);
     _wordlistFile = prefs.getString("wordlist_file", PIN_WORDLIST_PATH);
     _startIndex = prefs.getULong64("start_index", 0);
     _currentIndex = prefs.getULong64("current_index", _startIndex);

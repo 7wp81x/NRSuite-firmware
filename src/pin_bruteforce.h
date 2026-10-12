@@ -59,6 +59,7 @@ private:
     PinBruteforceSource _source = PinBruteforceSource::RANGE;
 
     bool _standalone = false;
+    bool _armed = false;
     uint8_t _pinLength = 4;
     String _start;
     String _end;
