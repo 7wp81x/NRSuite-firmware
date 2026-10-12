@@ -86,8 +86,17 @@ bool MassStorage::writeFile(const char* path, const String& content, bool append
 
     File f = FFat.open(path, append ? FILE_APPEND : FILE_WRITE);
     if (!f) {
+        // A previously interrupted or corrupted FAT volume can mount but fail
+        // to open files. Rebuild it once and retry rather than silently
+        // breaking BadUSB/file upload.
         FFat.end();
-        return false;
+        if (!FFat.format(FFAT_WIPE_QUICK, (char*)FAT_LABEL)) return false;
+        if (!FFat.begin(true, "/ffat", 10, FAT_LABEL)) return false;
+        f = FFat.open(path, append ? FILE_APPEND : FILE_WRITE);
+        if (!f) {
+            FFat.end();
+            return false;
+        }
     }
     size_t written = f.print(content);
     f.close();
