@@ -68,6 +68,7 @@ private:
     String _suffix;
     uint32_t _timeoutMs = 1000;
     uint16_t _attemptsBeforeTimeout = 0;
+    uint32_t _cooldownMs = 30000;
     uint32_t _interAttemptMs = 400;
     bool _autoResume = true;
     String _sessionKey = "default";
