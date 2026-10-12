@@ -32,7 +32,7 @@ public:
     bool resume(String& error);
     bool stop();
     bool clear(bool clearWordlist, String& error);
-    void status(JsonDocument& doc) const;
+    void status(JsonDocument& doc);
 
     // Standalone native-HID path: called once from setup() before the normal
     // USB CDC bridge begins. Returns true if a persisted session was executed.

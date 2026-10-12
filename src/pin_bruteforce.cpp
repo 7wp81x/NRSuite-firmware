@@ -59,6 +59,14 @@ uint64_t saturatingPow(uint32_t base, uint8_t exponent) {
 void PinBruteforce::begin(BridgeProtocol& proto) {
     _proto = &proto;
     loadPersistedSession();
+    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID && !_armed &&
+        (_state == PinBruteforceState::ARMED || _state == PinBruteforceState::RUNNING)) {
+        // A normal USB boot means the one-shot HID run was interrupted before
+        // it could finish. Keep the saved progress for the app, but do not
+        // report it as currently running.
+        _state = PinBruteforceState::PAUSED;
+        persistSession();
+    }
 }
 
 const char* PinBruteforce::stateName() const {
@@ -721,7 +729,7 @@ void PinBruteforce::emitError(const char* code, const char* message) {
     emitStatus("error");
 }
 
-void PinBruteforce::status(JsonDocument& doc) const {
+void PinBruteforce::status(JsonDocument& doc) {
     doc["state"] = stateName();
     doc["mode"] = modeName();
     doc["source"] = sourceName();
@@ -729,7 +737,10 @@ void PinBruteforce::status(JsonDocument& doc) const {
     doc["armed"] = _armed;
     doc["active"] = active();
     doc["pin_length"] = _pinLength;
+    doc["start"] = _start;
+    doc["end"] = _end;
     doc["charset"] = _charset;
+    doc["charset_mode"] = (_charset == "0123456789") ? "digits" : "custom";
     doc["prefix"] = _prefix;
     doc["suffix"] = _suffix;
     doc["timeout_ms"] = _timeoutMs;
@@ -749,13 +760,28 @@ void PinBruteforce::status(JsonDocument& doc) const {
     doc["last_error"] = _lastError;
     doc["started_at"] = _startedAt;
     doc["updated_at"] = _updatedAt;
+    doc["wordlist_file"] = _wordlistFile;
     doc["wordlist_lines"] = 0;
-    if (_source == PinBruteforceSource::WORDLIST && _wordlist.length() > 0) {
-        uint32_t lines = 0;
-        for (size_t i = 0; i < _wordlist.length(); i++) if (_wordlist[i] == '\n') lines++;
-        doc["wordlist_lines"] = lines;
+    doc["wordlist_bytes"] = 0;
+    doc["wordlist_present"] = false;
+    if (_source == PinBruteforceSource::WORDLIST) {
+        String content;
+        if (readWordlistFile(content)) {
+            uint32_t lines = 0;
+            int lineStart = 0;
+            while (lineStart <= (int)content.length()) {
+                int nl = content.indexOf('\n', lineStart);
+                String line = (nl < 0) ? content.substring(lineStart) : content.substring(lineStart, nl);
+                line.trim();
+                if (line.length() > 0) lines++;
+                if (nl < 0) break;
+                lineStart = nl + 1;
+            }
+            doc["wordlist_lines"] = lines;
+            doc["wordlist_bytes"] = content.length();
+            doc["wordlist_present"] = true;
+        }
     }
-    doc["wordlist_bytes"] = _wordlist.length();
 
     Preferences prefs;
     if (prefs.begin(NVS_NAMESPACE, true)) {
