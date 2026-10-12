@@ -1330,7 +1330,11 @@ void setup() {
         if (mscMode) {
             MassStorage::setup();   // USB.begin() called fresh, nothing else has touched USB yet
             while (true) delay(1000);
-        } else if(UsbHID::runIfArmed()) {
+        } else if (pinBruteforce.runIfArmed()) {
+            // One-shot HID session, like BadUSB. Keep the device in HID mode
+            // until the user unplugs/replugs it, then re-arm from the app.
+            while (true) delay(1500);
+        } else if (UsbHID::runIfArmed()) {
             while (true) delay(1500);
         }
         #endif

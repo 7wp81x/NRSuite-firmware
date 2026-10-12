@@ -76,6 +76,7 @@ private:
     int8_t _uartRxPin = -1;
     int8_t _uartTxPin = -1;
 
+    uint64_t _startIndex = 0;
     uint64_t _currentIndex = 0;
     uint64_t _endIndex = 0;
     uint32_t _attemptsTotal = 0;
