@@ -151,6 +151,7 @@ bool PinBruteforce::validateConfig(String& error) {
             return false;
         }
         if (!loadWordlist(error)) return false;
+        _startIndex = 0;
         _currentIndex = 0;
         _endIndex = 0;
         return true;
@@ -193,6 +194,7 @@ bool PinBruteforce::validateConfig(String& error) {
         error = "end is before start";
         return false;
     }
+    _startIndex = startIndex;
     _currentIndex = startIndex;
     _endIndex = endIndex;
     return true;
@@ -475,6 +477,10 @@ bool PinBruteforce::resume(String& error) {
         error = "persisted session is already finished";
         return false;
     }
+    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) {
+        error = "native HID is one-shot; re-arm with PIN_RANGE_START and reconnect";
+        return false;
+    }
     if (_source == PinBruteforceSource::WORDLIST && !loadWordlist(error)) {
         return false;
     }
@@ -527,16 +533,10 @@ bool PinBruteforce::clear(bool clearWordlist, String& error) {
 }
 
 void PinBruteforce::update() {
-    if (_state == PinBruteforceState::ARMED &&
-        _mode == PinBruteforceMode::STANDALONE_NATIVE_HID &&
-        _autoResume) {
-        String error;
-        if (initHid(error)) {
-            _state = PinBruteforceState::RUNNING;
-            _nextAttemptAtMs = millis();
-            emitStatus("auto_resume");
-        }
-    }
+    // Native HID is deliberately one-shot and boot-armed like BadUSB.
+    // It is executed from setup() before USB CDC is initialised, so the
+    // normal firmware loop must never start a native HID session live.
+    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) return;
     if (_state != PinBruteforceState::RUNNING) return;
     const uint32_t now = millis();
     if (_nextAttemptAtMs != 0 && now < _nextAttemptAtMs) return;
@@ -576,9 +576,13 @@ bool PinBruteforce::runIfArmed() {
     return false;
 #else
     loadPersistedSession();
-    if (!_autoResume) return false;
     if (_mode != PinBruteforceMode::STANDALONE_NATIVE_HID) return false;
     if (_state != PinBruteforceState::ARMED && _state != PinBruteforceState::RUNNING) return false;
+    if (_state == PinBruteforceState::RUNNING && !_autoResume) {
+        _currentIndex = _startIndex;
+        _attemptsTotal = 0;
+        _attemptsInCycle = 0;
+    }
 
     String error;
     if (_source == PinBruteforceSource::WORDLIST && !loadWordlist(error)) {
@@ -596,7 +600,6 @@ bool PinBruteforce::runIfArmed() {
 
     _standalone = true;
     _state = PinBruteforceState::RUNNING;
-    _attemptsTotal = 0;
     _nextAttemptAtMs = 0;
     if (_startedAt == 0) _startedAt = millis();
     emitStatus("standalone_running");
@@ -692,6 +695,7 @@ void PinBruteforce::status(JsonDocument& doc) const {
     doc["inter_attempt_ms"] = _interAttemptMs;
     doc["auto_resume"] = _autoResume;
     doc["session_key"] = _sessionKey;
+    doc["start_index"] = (uint32_t)_startIndex;
     doc["current_index"] = (uint32_t)_currentIndex;
     doc["end_index"] = (uint32_t)_endIndex;
     doc["current_sequence"] = (uint32_t)_currentIndex;
@@ -736,6 +740,7 @@ void PinBruteforce::persistSession() {
     prefs.putUInt("inter", _interAttemptMs);
     prefs.putBool("auto_resume", _autoResume);
     prefs.putString("wordlist_file", _wordlistFile);
+    prefs.putULong64("start_index", _startIndex);
     prefs.putULong64("current_index", _currentIndex);
     prefs.putULong64("end_index", _endIndex);
     prefs.putUInt("attempts_total", _attemptsTotal);
@@ -770,7 +775,8 @@ void PinBruteforce::loadPersistedSession() {
     _autoResume = prefs.getBool("auto_resume", true);
     _sessionKey = prefs.getString("session_key", "default");
     _wordlistFile = prefs.getString("wordlist_file", PIN_WORDLIST_PATH);
-    _currentIndex = prefs.getULong64("current_index", 0);
+    _startIndex = prefs.getULong64("start_index", 0);
+    _currentIndex = prefs.getULong64("current_index", _startIndex);
     _endIndex = prefs.getULong64("end_index", 0);
     _attemptsTotal = prefs.getUInt("attempts_total", 0);
     _attemptsInCycle = prefs.getUInt("attempts_cycle", 0);
