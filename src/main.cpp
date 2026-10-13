@@ -9,6 +9,7 @@
 #include "hidden_ap.h"
 #include "mesh.h"
 #include "pin_bruteforce.h"
+#include "ld2450.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -51,6 +52,7 @@ BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
 MeshManager    mesh;
+Ld2450         ld2450;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -220,6 +222,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("wps");
         features.add("hidden_ap");
         features.add("storage");
+        features.add("ld2450");
         // Capability flag: mesh code is present and can be provisioned.
         features.add("mesh_provision");
         // Availability flag: only advertised once valid derived keys exist.
@@ -1353,6 +1356,9 @@ void setup() {
     Serial.begin(115200);
     delay(150);
 
+    // LD2450 bring-up: UART2 defaults for classic ESP32 devkit.
+    ld2450.begin(Serial1, 256000, 16, 17);
+
     #if defined(CONFIG_IDF_TARGET_ESP32S2)
         pinMode(LED_PIN, OUTPUT);
     #endif
@@ -1431,6 +1437,7 @@ void loop() {
     hiddenApDetector.update();
     mesh.update();
     pinBruteforce.update();
+    ld2450.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();
