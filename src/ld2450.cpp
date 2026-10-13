@@ -1,28 +1,47 @@
 #include "ld2450.h"
 
-void Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin) {
+bool Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin,
+                   bool debugPrint) {
     _serial = &serial;
+    _debugPrint = debugPrint;
     _serial->begin(baud, SERIAL_8N1, rxPin, txPin);
     resetParser();
+    resetTargets();
+    _validFrames = 0;
+    _invalidFrames = 0;
+    _droppedBytes = 0;
+    _lastFrameMs = 0;
+    _targetCount = 0;
     _active = true;
     _lastNoTargetPrintMs = millis();
     _lastStatsPrintMs = millis();
     _rawPrintCounter = 0;
 
-    Serial.printf("[LD2450] UART2 started: baud=%lu rx=%d tx=%d\n",
-                  (unsigned long)baud, rxPin, txPin);
+    if (_debugPrint) {
+        Serial.printf("[LD2450] UART started: baud=%lu rx=%d tx=%d\n",
+                      (unsigned long)baud, rxPin, txPin);
+    }
+    return true;
 }
 
 void Ld2450::resetParser() {
     _state = ParserState::HEADER_0;
     _payloadPos = 0;
     memset(_payload, 0, sizeof(_payload));
+}
+
+void Ld2450::resetTargets() {
     for (auto& target : _targets) target = Target{};
 }
 
 void Ld2450::stop() {
     _active = false;
-    Serial.println("[LD2450] stopped");
+    resetParser();
+    _targetCount = 0;
+    resetTargets();
+    if (_debugPrint) {
+        Serial.println("[LD2450] stopped");
+    }
 }
 
 void Ld2450::update() {
@@ -77,6 +96,7 @@ void Ld2450::handleByte(uint8_t value) {
 
 void Ld2450::handleFrame() {
     _validFrames++;
+    _lastFrameMs = millis();
     uint8_t validCount = 0;
     for (uint8_t i = 0; i < 3; i++) {
         const uint8_t* base = _payload + (i * 8);
@@ -89,6 +109,7 @@ void Ld2450::handleFrame() {
                          target.speedCmS == 0 && target.resolutionMm == 0);
         if (target.valid) validCount++;
     }
+    _targetCount = validCount;
 
     if (_debugPrint) {
         _rawPrintCounter++;
@@ -141,12 +162,11 @@ void Ld2450::printFrame(uint8_t validCount) {
 }
 
 int16_t Ld2450::readI16(const uint8_t* data) {
-    // LD2450 uses sign bit + 15-bit magnitude for X/Y/speed, not
-    // two's-complement. Reading it as a normal signed int16 turns small
-    // negative targets into ~ -32000 values.
+    // LD2450 uses sign bit + 15-bit magnitude, not two's-complement.
+    // Bit 15 = 1 is positive; bit 15 = 0 is negative.
     const uint16_t raw = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
     int16_t magnitude = (int16_t)(raw & 0x7FFF);
-    return (raw & 0x8000) ? (int16_t)(-magnitude) : magnitude;
+    return (raw & 0x8000) ? magnitude : (int16_t)(-magnitude);
 }
 
 uint16_t Ld2450::readU16(const uint8_t* data) {
@@ -154,7 +174,9 @@ uint16_t Ld2450::readU16(const uint8_t* data) {
 }
 
 const char* Ld2450::motionLabel(int16_t speedCmS) {
-    if (speedCmS > 10) return "approaching";
-    if (speedCmS < -10) return "receding";
+    // With the reference sign convention, negative radial speed is motion
+    // toward the sensor (approaching); positive is moving away (receding).
+    if (speedCmS < -10) return "approaching";
+    if (speedCmS > 10) return "receding";
     return "stationary";
 }

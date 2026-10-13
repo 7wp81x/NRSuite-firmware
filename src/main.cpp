@@ -15,6 +15,13 @@
 
 #define FW_VERSION "1.0.0-beta.2"
 
+#ifndef LD2450_BOOT_START
+#define LD2450_BOOT_START 0
+#endif
+#ifndef LD2450_BOOT_DEBUG
+#define LD2450_BOOT_DEBUG 0
+#endif
+
 #ifdef ENABLE_BLE_HID
 #include "ble_hid.h"
 #include "ble_scanner.h"
@@ -154,6 +161,7 @@ static void stopRadioModules() {
 
 static void stopAllModules() {
     pinBruteforce.stop();
+    ld2450.stop();
     stopRadioModules();
     #ifdef ENABLE_BLE_HID
         bleProfile.stop();
@@ -173,6 +181,120 @@ static void radioIdle() {
         bleScanner.stop();
     #endif
     vTaskDelay(pdMS_TO_TICKS(80));
+}
+
+// ── LD2450 command/event layer ────────────────────────────────────────────────
+static constexpr uint32_t LD2450_BAUD = 256000;
+static constexpr int8_t LD2450_RX_PIN = 16;
+static constexpr int8_t LD2450_TX_PIN = 17;
+
+static uint32_t ld2450StartedMs = 0;
+static uint32_t ld2450LastTargetsFrame = 0;
+static uint32_t ld2450LastErrorEventMs = 0;
+static uint32_t ld2450LastInvalidFrames = 0;
+static bool ld2450LastPresence = false;
+
+static void resetLd2450EventTracking() {
+    ld2450StartedMs = millis();
+    ld2450LastTargetsFrame = ld2450.validFrames();
+    ld2450LastErrorEventMs = 0;
+    ld2450LastInvalidFrames = ld2450.invalidFrames();
+    ld2450LastPresence = ld2450.targetCount() > 0;
+}
+
+static void appendLd2450Status(JsonDocument& doc) {
+    const uint32_t now = millis();
+    const uint32_t lastFrameMs = ld2450.lastFrameMs();
+    doc["active"] = ld2450.active();
+    doc["debug"] = ld2450.debugPrint();
+    doc["valid_frames"] = ld2450.validFrames();
+    doc["invalid_frames"] = ld2450.invalidFrames();
+    doc["dropped_bytes"] = ld2450.droppedBytes();
+    doc["target_count"] = ld2450.targetCount();
+    doc["presence"] = ld2450.targetCount() > 0;
+    doc["has_data"] = ld2450.hasData();
+    doc["last_frame_ms"] = lastFrameMs;
+    doc["uptime_ms"] = now;
+    doc["baud"] = LD2450_BAUD;
+    doc["rx_pin"] = LD2450_RX_PIN;
+    doc["tx_pin"] = LD2450_TX_PIN;
+    if (lastFrameMs > 0) {
+        doc["last_frame_age_ms"] = now >= lastFrameMs ? (now - lastFrameMs) : 0;
+    } else {
+        doc["last_frame_age_ms"] = 0;
+    }
+}
+
+static void sendLd2450StatusResp(uint8_t id, bool ok = true, const char* msg = nullptr) {
+    JsonDocument resp;
+    resp["ok"] = ok;
+    if (msg) resp["msg"] = msg;
+    appendLd2450Status(resp);
+    String json;
+    serializeJson(resp, json);
+    proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+}
+
+static void emitLd2450Events() {
+    if (!ld2450.active()) return;
+    const uint32_t now = millis();
+    const uint8_t targetCount = ld2450.targetCount();
+    const bool present = targetCount > 0;
+    const uint32_t validFrames = ld2450.validFrames();
+
+    if (validFrames != ld2450LastTargetsFrame) {
+        ld2450LastTargetsFrame = validFrames;
+        JsonDocument ev;
+        ev["uptime"] = now;
+        ev["target_count"] = targetCount;
+        ev["has_data"] = ld2450.hasData();
+        ev["valid_frames"] = validFrames;
+        JsonArray targets = ev["targets"].to<JsonArray>();
+        const Ld2450::Target* data = ld2450.targets();
+        for (uint8_t i = 0; i < 3; i++) {
+            const Ld2450::Target& target = data[i];
+            if (!target.valid) continue;
+            JsonObject item = targets.add<JsonObject>();
+            item["slot"] = i + 1;
+            item["x_mm"] = target.xMm;
+            item["y_mm"] = target.yMm;
+            item["speed_cm_s"] = target.speedCmS;
+            item["resolution_mm"] = target.resolutionMm;
+        }
+        proto.sendEvent("ld2450_targets", ev);
+    }
+
+    if (present != ld2450LastPresence) {
+        ld2450LastPresence = present;
+        JsonDocument ev;
+        ev["uptime"] = now;
+        ev["present"] = present;
+        ev["target_count"] = targetCount;
+        proto.sendEvent("ld2450_presence", ev);
+    }
+
+    const uint32_t invalidFrames = ld2450.invalidFrames();
+    const bool parseError = invalidFrames > ld2450LastInvalidFrames;
+    const bool noData = validFrames == 0 && now - ld2450StartedMs >= 3000;
+    bool errorSent = false;
+    if ((parseError || noData) && now - ld2450LastErrorEventMs >= 3000) {
+        JsonDocument ev;
+        ev["kind"] = parseError ? "parse_error" : "no_data";
+        ev["msg"] = parseError ? "LD2450 frame parse error" : "No LD2450 frames received";
+        ev["active"] = true;
+        ev["valid_frames"] = validFrames;
+        ev["invalid_frames"] = invalidFrames;
+        ev["dropped_bytes"] = ld2450.droppedBytes();
+        ev["last_frame_age_ms"] = ld2450.lastFrameMs() > 0
+            ? (now >= ld2450.lastFrameMs() ? now - ld2450.lastFrameMs() : 0)
+            : 0;
+        proto.sendEvent("ld2450_error", ev);
+        ld2450LastErrorEventMs = now;
+        errorSent = true;
+    }
+    if (!parseError || errorSent) {
+        ld2450LastInvalidFrames = invalidFrames;
+    }
 }
 
 // ── Command Handler ──────────────────────────────────────────────────────────
@@ -288,6 +410,24 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "STOP_ALL") == 0) {
         stopAllModules();
         proto.sendResp(id, true, "all modules stopped");
+    }
+
+    // ── LD2450 MM-WAVE RADAR ──────────────────────────────────────────────
+    else if (strcmp(cmd, "LD2450_START") == 0) {
+        const bool debug = doc["args"]["debug"] | false;
+        bool ok = ld2450.begin(Serial1, LD2450_BAUD, LD2450_RX_PIN, LD2450_TX_PIN, debug);
+        resetLd2450EventTracking();
+        sendLd2450StatusResp(id, ok, ok ? "ld2450 started" : "ld2450 start failed");
+    }
+
+    else if (strcmp(cmd, "LD2450_STOP") == 0) {
+        ld2450.stop();
+        resetLd2450EventTracking();
+        sendLd2450StatusResp(id, true, "ld2450 stopped");
+    }
+
+    else if (strcmp(cmd, "LD2450_STATUS") == 0) {
+        sendLd2450StatusResp(id, true, nullptr);
     }
 
     // ── START_SNIFF ──────────────────────────────────────────────────────
@@ -1356,8 +1496,11 @@ void setup() {
     Serial.begin(115200);
     delay(150);
 
-    // LD2450 bring-up: UART2 defaults for classic ESP32 devkit.
-    ld2450.begin(Serial1, 256000, 16, 17);
+    #if LD2450_BOOT_START
+        // Devkit bring-up: UART2 defaults for classic ESP32 devkit.
+        ld2450.begin(Serial1, LD2450_BAUD, LD2450_RX_PIN, LD2450_TX_PIN,
+                     LD2450_BOOT_DEBUG);
+    #endif
 
     #if defined(CONFIG_IDF_TARGET_ESP32S2)
         pinMode(LED_PIN, OUTPUT);
@@ -1438,6 +1581,7 @@ void loop() {
     mesh.update();
     pinBruteforce.update();
     ld2450.update();
+    emitLd2450Events();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();

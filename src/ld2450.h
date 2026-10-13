@@ -5,8 +5,7 @@
 /**
  * HLK-LD2450 24 GHz mmWave radar UART driver.
  *
- * First-stage implementation used to bring the sensor up over the laptop
- * serial monitor. It parses the standard 30-byte target frame:
+ * Parses the standard 30-byte target frame:
  *
  *   AA FF 03 00
  *   target 1: X i16, Y i16, speed i16, resolution u16
@@ -14,8 +13,9 @@
  *   target 3: X i16, Y i16, speed i16, resolution u16
  *   55 CC
  *
- * Coordinates are millimetres (signed), speed is cm/s (signed), and
- * resolution is millimetres.
+ * X/Y are millimetres, speed is cm/s, and resolution is millimetres.
+ * X/Y/speed use sign bit + 15-bit magnitude (not two's-complement):
+ *   bit 15 = 1 -> positive, bit 15 = 0 -> negative.
  */
 class Ld2450 {
 public:
@@ -27,15 +27,20 @@ public:
         uint16_t resolutionMm = 0;
     };
 
-    void begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin);
+    bool begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin,
+               bool debugPrint = false);
     void update();
+    void stop();
     void setDebugPrint(bool enabled) { _debugPrint = enabled; }
 
     bool active() const { return _active; }
-    void stop();
+    bool debugPrint() const { return _debugPrint; }
+    bool hasData() const { return _validFrames > 0; }
     uint32_t validFrames() const { return _validFrames; }
     uint32_t invalidFrames() const { return _invalidFrames; }
     uint32_t droppedBytes() const { return _droppedBytes; }
+    uint32_t lastFrameMs() const { return _lastFrameMs; }
+    uint8_t targetCount() const { return _targetCount; }
     const Target* targets() const { return _targets; }
 
 private:
@@ -51,7 +56,7 @@ private:
 
     HardwareSerial* _serial = nullptr;
     bool _active = false;
-    bool _debugPrint = true;
+    bool _debugPrint = false;
 
     ParserState _state = ParserState::HEADER_0;
     uint8_t _payload[24] = {0};
@@ -59,13 +64,16 @@ private:
     uint32_t _validFrames = 0;
     uint32_t _invalidFrames = 0;
     uint32_t _droppedBytes = 0;
+    uint32_t _lastFrameMs = 0;
     uint32_t _lastNoTargetPrintMs = 0;
     uint32_t _lastStatsPrintMs = 0;
     uint32_t _rawPrintCounter = 0;
+    uint8_t _targetCount = 0;
 
     Target _targets[3];
 
     void resetParser();
+    void resetTargets();
     void handleByte(uint8_t value);
     void handleFrame();
     void printFrame(uint8_t validCount);

@@ -51,7 +51,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | BLE GATT Profile | C3, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage; NVS fallback when FAT is unavailable |
 | PIN Bruteforce | S2, S3 | Supervised native-HID range/wordlist tester; one-shot boot-arm like BadUSB; session persistence; CH9329 abandoned |
-| LD2450 mmWave Radar | All | UART 256000 target parser and serial-monitor bring-up; Android radar UI planned |
+| LD2450 mmWave Radar | All | UART 256000 target parser, sign-magnitude decode, serial bring-up, `LD2450_START/STOP/STATUS` commands, and target/presence/error events |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 | Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
@@ -174,7 +174,7 @@ src/
   ble_profile.cpp/h    # Read-only BLE GATT profiler (C3, S3, DevKit)
   UsbHID.cpp/h         # USB HID BadUSB via TinyUSB (S2, S3)
   pin_bruteforce.cpp/h # Supervised native-HID PIN range/wordlist tester
-  ld2450.cpp/h         # HLK-LD2450 mmWave radar UART parser
+  ld2450.cpp/h         # HLK-LD2450 mmWave radar UART parser and event counters
   mass_storage.cpp/h   # USB MSC + FAT filesystem (S2, S3)
   FileUpload.cpp/h     # Chunked file upload to mass storage
   override_sanity.cpp  # ieee80211 raw frame sanity check override (required for frame injection)
