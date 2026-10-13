@@ -117,6 +117,18 @@ Build all targets:
 pio run -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
 ```
 
+### LD2450 standalone serial bring-up
+
+Normal builds leave the LD2450 stopped until Android sends `LD2450_START`.
+For standalone serial-monitor bring-up, build the debug profile:
+
+```bash
+pio run -e esp32-devkit-ld2450-debug -t upload
+pio device monitor -b 115200
+```
+
+That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
+
 ---
 
 ## Flashing
