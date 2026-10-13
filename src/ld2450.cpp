@@ -7,6 +7,7 @@ void Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t t
     _active = true;
     _lastNoTargetPrintMs = millis();
     _lastStatsPrintMs = millis();
+    _rawPrintCounter = 0;
 
     Serial.printf("[LD2450] UART2 started: baud=%lu rx=%d tx=%d\n",
                   (unsigned long)baud, rxPin, txPin);
@@ -89,8 +90,22 @@ void Ld2450::handleFrame() {
         if (target.valid) validCount++;
     }
 
-    if (_debugPrint) printFrame(validCount);
+    if (_debugPrint) {
+        _rawPrintCounter++;
+        if (_rawPrintCounter == 1 || (_rawPrintCounter % 100) == 0) {
+            printRawFrame();
+        }
+        printFrame(validCount);
+    }
     resetParser();
+}
+
+void Ld2450::printRawFrame() {
+    Serial.print("[LD2450] raw: AA FF 03 00");
+    for (size_t i = 0; i < sizeof(_payload); i++) {
+        Serial.printf(" %02X", _payload[i]);
+    }
+    Serial.println(" 55 CC");
 }
 
 void Ld2450::printFrame(uint8_t validCount) {
@@ -126,7 +141,12 @@ void Ld2450::printFrame(uint8_t validCount) {
 }
 
 int16_t Ld2450::readI16(const uint8_t* data) {
-    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+    // LD2450 uses sign bit + 15-bit magnitude for X/Y/speed, not
+    // two's-complement. Reading it as a normal signed int16 turns small
+    // negative targets into ~ -32000 values.
+    const uint16_t raw = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+    int16_t magnitude = (int16_t)(raw & 0x7FFF);
+    return (raw & 0x8000) ? (int16_t)(-magnitude) : magnitude;
 }
 
 uint16_t Ld2450::readU16(const uint8_t* data) {
