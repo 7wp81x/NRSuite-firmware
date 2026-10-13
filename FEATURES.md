@@ -23,7 +23,8 @@ This document lists all current and planned features across the NRSuite ecosyste
 | BLE Scanner | ✅ | Advertisement scan with names, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | ✅ | Read-only service/characteristic enumeration over a BLE connection |
 | FastPair Model ID | 📋 | Map FastPair model IDs to known device names/types |
-| BadUSB | ✅ | HID injection via USB |
+| BadUSB | ✅ | HID injection via USB; DuckyScript NVS fallback when FAT is unavailable |
+| PIN Bruteforce | ✅ | Native-HID range/wordlist tester; one-shot boot-arm like BadUSB; session persistence; CH9329 abandoned |
 | Credential Manager | ✅ | Local storage of harvested creds |
 
 ## 2. Defense Modules
@@ -99,6 +100,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 | **nRF24** — RC/Device Scanner | 📋 | Detect nearby nRF24-based peripherals |
 | **nRF24** — MouseJack-style Analysis | 📋 | Detection/analysis of known-vulnerable wireless HID dongles |
 | **nRF24** — Packet Sniffer | 📋 | Promiscuous capture for research |
+| **LD2450** — mmWave Radar | 🚧 | UART 256000 target parser and serial-monitor bring-up; Android radar plot/config pending |
 | **RFID/NFC** — Read (125kHz + 13.56MHz) | 📋 | RC522 + LF reader modules |
 | **RFID/NFC** — Emulate | 📋 | Replay previously-read tag |
 | **RFID/NFC** — Write/Clone | 📋 | To blank/magic tags |
