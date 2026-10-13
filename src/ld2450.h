@@ -61,6 +61,7 @@ private:
     uint32_t _droppedBytes = 0;
     uint32_t _lastNoTargetPrintMs = 0;
     uint32_t _lastStatsPrintMs = 0;
+    uint32_t _rawPrintCounter = 0;
 
     Target _targets[3];
 
@@ -68,6 +69,7 @@ private:
     void handleByte(uint8_t value);
     void handleFrame();
     void printFrame(uint8_t validCount);
+    void printRawFrame();
     static int16_t readI16(const uint8_t* data);
     static uint16_t readU16(const uint8_t* data);
     static const char* motionLabel(int16_t speedCmS);
