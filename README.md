@@ -37,8 +37,9 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 | Module | Supported Boards | Description |
 |---|---|---|
-| Wi-Fi Scan | All | Active AP scan with SSID, BSSID, channel, RSSI, security type |
-| Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or channel hopping, optional EAPOL-only filter |
+| Wi-Fi Scan | All (C5: 2.4/5 GHz) | Active AP scan with SSID, BSSID, channel, RSSI, security type; AUTO band mode on C5 |
+| Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
+| Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
 | Deauthentication | All | Raw 802.11 deauth frame injection, broadcast or targeted |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
@@ -46,15 +47,21 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
 | Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
-| BLE HID | C3, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
-| BLE Scanner | C3, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
-| BLE GATT Profile | C3, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
+| BLE HID | C3, C5, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
+| BLE Scanner | C3, C5, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
+| BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage; NVS fallback when FAT is unavailable |
-| PIN Bruteforce | S2, S3 | Supervised native-HID range/wordlist tester; one-shot boot-arm like BadUSB; session persistence; CH9329 abandoned |
+| PIN Bruteforce | S2, S3 | Supervised native-HID range/wordlist tester; one-shot boot-arm like BadUSB; max-attempt safety cap, progress/ETA, configurable typing/start delays, session persistence; native HID only |
+| BLE HID PIN Bruteforce | C3, C5, S3, DevKit | Hidden/experimental: live CDC-controlled BLE HID PIN tester retained for future use; lock-screen use unsupported |
 | LD2450 mmWave Radar | All | UART 256000 target parser, sign-magnitude decode, serial bring-up, `LD2450_START/STOP/STATUS` commands, and target/presence/error events |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 | Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
+
+> ESP32-C5 builds advertise `wifi_5ghz` and default shared Wi-Fi scans to
+> `WIFI_BAND_MODE_AUTO`. The 2.4 GHz and 5 GHz C5 paths are hardware-validated.
+> The regulatory country is configured from Android Settings and enforced by
+> the firmware channel mask.
 
 ### Planned (see [FEATURES.md](./FEATURES.md))
 - FastPair Model Identification: map FastPair model IDs to known device names/types
@@ -186,6 +193,7 @@ src/
   ble_profile.cpp/h    # Read-only BLE GATT profiler (C3, S3, DevKit)
   UsbHID.cpp/h         # USB HID BadUSB via TinyUSB (S2, S3)
   pin_bruteforce.cpp/h # Supervised native-HID PIN range/wordlist tester
+  ble_pin_bruteforce.cpp/h # Live BLE HID PIN range/wordlist tester
   ld2450.cpp/h         # HLK-LD2450 mmWave radar UART parser and event counters
   mass_storage.cpp/h   # USB MSC + FAT filesystem (S2, S3)
   FileUpload.cpp/h     # Chunked file upload to mass storage

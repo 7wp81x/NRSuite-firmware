@@ -31,26 +31,44 @@ void begin(const String& deviceName) {
 void end() {
     if (!keyboard) return;
     keyboard->releaseAll();
-    NimBLEDevice::stopAdvertising();
+    // Keep the keyboard/GATT objects alive so a later begin() can restart
+    // advertising without rebuilding the NimBLE stack. The library's end()
+    // disconnects peers and stops advertising while preserving its state.
+    keyboard->end();
     advertising = false;
-    delete keyboard;
-    keyboard = nullptr;
 }
 
 bool isAdvertising() {
-    return keyboard && advertising;
+    // The library does not update the advertising flag when a host connects,
+    // so derive it from the live GAP state. Once disconnected, the library
+    // restarts advertising automatically.
+    return keyboard && advertising && !keyboard->isConnected();
 }
 
 bool isConnected() {
     return keyboard && keyboard->isPaired();
 }
 
+bool isBonded() {
+    return keyboard && keyboard->isBonded();
+}
+
 String peerAddress() {
     if (!isConnected()) return "";
     auto pServer = NimBLEDevice::getServer();
-    if (pServer->getConnectedCount() == 0) return "";
+    if (!pServer || pServer->getConnectedCount() == 0) return "";
     NimBLEConnInfo peerInfo = pServer->getPeerInfo(0);
     return String(peerInfo.getAddress().toString().c_str());
+}
+
+void clearBonds() {
+    if (keyboard) keyboard->clearBonds();
+}
+
+bool disconnectPeer() {
+    auto pServer = NimBLEDevice::getServer();
+    if (!pServer || pServer->getConnectedCount() == 0) return false;
+    return pServer->disconnect(pServer->getPeerInfo(0));
 }
 
 // ====================== Keymap ======================
@@ -192,6 +210,21 @@ void tapKey(const String& keyName) {
 size_t typeText(const String& text) {
     if (!isConnected()) return 0;
     return keyboard->print(text);
+}
+
+size_t typeTextSlow(const String& text, uint16_t charDelayMs) {
+    if (!isConnected()) return 0;
+    size_t written = 0;
+    for (size_t i = 0; i < text.length(); i++) {
+        if (!isConnected()) break;
+        size_t n = keyboard->print(text[i]);
+        if (n == 0) break;
+        written += n;
+        if (charDelayMs > 0) delay(charDelayMs);
+    }
+    keyboard->releaseAll();
+    if (charDelayMs > 0) delay(charDelayMs);
+    return written;
 }
 
 static uint8_t mouseButtonMask(const String& button) {

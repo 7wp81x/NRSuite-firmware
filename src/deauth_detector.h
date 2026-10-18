@@ -10,6 +10,7 @@
 
 struct DeauthDetectConfig {
     bool     hop = false;
+    bool     include5ghz = false;
     uint8_t  channel = 1;
     uint16_t intervalMs = 300;
     bool     hasBssid = false;

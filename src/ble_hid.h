@@ -17,7 +17,10 @@ namespace BleHid {
 void begin(const String& deviceName);
 void end();
 bool isConnected();
+bool isBonded();
 String peerAddress();
+void clearBonds();
+bool disconnectPeer();
 int runScript(const String& payload);
 void stop();
 bool isAdvertising();
@@ -25,6 +28,7 @@ void keyDown(const String& keyName);
 void keyUp(const String& keyName);
 void tapKey(const String& keyName);
 size_t typeText(const String& text);
+size_t typeTextSlow(const String& text, uint16_t charDelayMs);
 void mouseMove(int dx, int dy);
 void mouseScroll(int wheel);
 void mouseButton(const String& button, bool down);

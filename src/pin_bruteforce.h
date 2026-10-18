@@ -15,7 +15,6 @@ enum class PinBruteforceState : uint8_t {
 
 enum class PinBruteforceMode : uint8_t {
     STANDALONE_NATIVE_HID = 0,
-    EXTERNAL_CH9329_REALTIME,
 };
 
 enum class PinBruteforceSource : uint8_t {
@@ -29,7 +28,6 @@ public:
     void update();
 
     bool start(JsonObject args, String& error);
-    bool resume(String& error);
     bool stop();
     void disarm();
     bool clear(bool clearWordlist, String& error);
@@ -41,7 +39,14 @@ public:
 
     // Wordlist upload support. Data is decoded by the command handler.
     bool beginWordlistUpload(String& error);
-    bool addWordlistChunk(const uint8_t* data, size_t len, bool last, String& error);
+    bool addWordlistChunk(
+        const uint8_t* data,
+        size_t len,
+        uint32_t offset,
+        uint32_t checksum,
+        bool last,
+        String& error
+    );
     void resetWordlistUpload();
 
     bool active() const { return _state == PinBruteforceState::RUNNING || _state == PinBruteforceState::ARMED; }
@@ -51,7 +56,6 @@ private:
     static constexpr const char* WORDLIST_PATH = "/pin_wordlist.txt";
     static constexpr size_t MAX_WORDLIST_BYTES = 16 * 1024;
     static constexpr size_t MAX_WORDLIST_LINES = 1000;
-    static constexpr uint32_t PERSIST_EVERY_N = 1;
 
     BridgeProtocol* _proto = nullptr;
 
@@ -64,26 +68,26 @@ private:
     uint8_t _pinLength = 4;
     String _start;
     String _end;
-    String _charset;
-    String _prefix;
-    String _suffix;
+    String _charset = "0123456789";
     uint32_t _timeoutMs = 1000;
     uint16_t _attemptsBeforeTimeout = 0;
     uint32_t _cooldownMs = 30000;
     uint32_t _interAttemptMs = 400;
+    uint16_t _typingDelayMs = 20;
+    uint16_t _startDelayMs = 1500;
     bool _autoResume = true;
     String _sessionKey = "default";
     String _wordlistFile = WORDLIST_PATH;
-
-    uint32_t _uartBaud = 115200;
-    int8_t _uartRxPin = -1;
-    int8_t _uartTxPin = -1;
+    uint32_t _maxAttempts = 0;
+    uint16_t _persistEvery = 1;
 
     uint64_t _startIndex = 0;
     uint64_t _currentIndex = 0;
     uint64_t _endIndex = 0;
     uint32_t _attemptsTotal = 0;
     uint32_t _attemptsInCycle = 0;
+    uint64_t _estimatedTotal = 0;
+    String _stopReason;
     String _lastPin;
     String _lastError;
     uint32_t _startedAt = 0;
@@ -108,6 +112,7 @@ private:
     void emitDone();
     void emitError(const char* code, const char* message);
     void persistSession();
+    void persistProgress();
     void loadPersistedSession();
     void clearPersistedSession();
     const char* stateName() const;
@@ -120,11 +125,8 @@ private:
     void removeWordlistFile();
     bool initHid(String& error);
     void stopHid();
-    bool initCh9329(String& error);
-    void ch9329SendKey(uint8_t keycode, uint8_t modifiers);
-    bool ch9329Char(char c);
-    void ch9329ReleaseAll();
     bool nextRangePin(String& out);
+    bool nextRangePinAt(uint64_t value, String& out);
 };
 
 extern PinBruteforce pinBruteforce;

@@ -12,19 +12,21 @@ This document lists all current and planned features across the NRSuite ecosyste
 
 | Feature | Status | Notes |
 |---|---|---|
-| Wi-Fi Scan | ✅ | Passive AP/channel discovery |
+| Wi-Fi Scan | ✅ | Active AP/channel discovery; band-aware `SCAN_WIFI`/`scan_ap`, AUTO 2.4+5 GHz on C5, 2.4 GHz fallback elsewhere; regulatory country/channel mask exposed via `STATUS` |
 | Beacon Injection | ✅ | Beacon frame injection/spoofing |
 | Deauthentication | ✅ | Deauth frame injection |
 | Evil Twin | ✅ | Rogue AP with captive portal |
 | Captive Portal | ✅ | Credential harvesting UI |
-| Packet Sniffer | ✅ | Monitor-mode capture, pcap export |
+| Packet Sniffer | ✅ | Monitor-mode capture, pcap export; AUTO/2.4/5 GHz hop selection on C5 and target-channel-aware fixed capture |
 | WPA Handshake Capture/Crack | ✅ | Offline dictionary cracking |
+| Nrugochi channel capture support | ✅ | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` supports multi-AP deauth plus all-EAPOL/all-beacon capture and reports requested/sent/failed frame counts |
 | BLE HID | ✅ | Bluetooth LE keyboard/mouse HID and DuckyScript payloads |
 | BLE Scanner | ✅ | Advertisement scan with names, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | ✅ | Read-only service/characteristic enumeration over a BLE connection |
 | FastPair Model ID | 📋 | Map FastPair model IDs to known device names/types |
 | BadUSB | ✅ | HID injection via USB; DuckyScript NVS fallback when FAT is unavailable |
-| PIN Bruteforce | ✅ | Native-HID range/wordlist tester; one-shot boot-arm like BadUSB; session persistence; CH9329 abandoned |
+| PIN Bruteforce | ✅ | Native-HID range/wordlist tester; one-shot boot-arm like BadUSB; configurable typing/start delays; session persistence; CH9329 abandoned |
+| BLE HID PIN Bruteforce | ✅ | Hidden/experimental: live CDC-controlled BLE HID PIN tester retained for future unlocked-host and mesh HID reuse; lock-screen use unsupported |
 | Credential Manager | ✅ | Local storage of harvested creds |
 
 ## 2. Defense Modules
