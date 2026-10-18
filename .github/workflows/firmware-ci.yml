@@ -20,7 +20,7 @@ jobs:
 
     strategy:
       matrix:
-        environment: [ esp32-c3, esp32-s3, esp32-s2, esp32-devkit ]
+        environment: [ esp32-c5, esp32-c3, esp32-s3, esp32-s2, esp32-devkit ]
       fail-fast: false
 
     steps:

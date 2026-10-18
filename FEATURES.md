@@ -12,6 +12,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 
 | Feature | Status | Notes |
 |---|---|---|
+| Firmware Release Assets | ✅ | Release CI builds merged images for ESP32-C5, C3, S3, S2, and classic ESP32; C5 merged image uses the correct `0x2000` bootloader layout |
 | Wi-Fi Scan | ✅ | Active AP/channel discovery; band-aware `SCAN_WIFI`/`scan_ap`, AUTO 2.4+5 GHz on C5, 2.4 GHz fallback elsewhere; regulatory country/channel mask exposed via `STATUS` |
 | Beacon Injection | ✅ | Beacon frame injection/spoofing |
 | Deauthentication | ✅ | Deauth frame injection |
