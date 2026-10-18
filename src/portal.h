@@ -9,7 +9,8 @@
 class PortalManager {
 public:
     void begin(BridgeProtocol& proto);
-    bool start(const char* ssid, uint8_t channel, const uint8_t* targetBssid = nullptr);
+    bool start(const char* ssid, uint8_t channel, const uint8_t* targetBssid = nullptr,
+               String* error = nullptr);
     void stop();
     bool setHtmlChunk(const uint8_t* data, size_t len, bool isLast = false,
                       size_t offset = 0, bool hasOffset = false);

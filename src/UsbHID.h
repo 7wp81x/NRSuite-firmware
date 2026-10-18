@@ -20,6 +20,7 @@ public:
     // Realtime helpers used by the PIN bruteforce module and future HID tools.
     static bool available();
     static void sendText(const String& text);
+    static void sendTextSlow(const String& text, uint16_t charDelayMs = 20);
     static void pressEnter();
     static void releaseAll();
 

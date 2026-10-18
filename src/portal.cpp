@@ -152,7 +152,8 @@ void PortalManager::deauthTaskFn(void* pv) {
 }
 
 // portal.cpp
-bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targetBssid) {
+bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targetBssid,
+                          String* error) {
     stop();  // always clean up any previous state, even if a prior start() failed partway
 
     // Rebuild the AP cleanly after a previous portal session. On some
@@ -161,18 +162,38 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     WiFi.mode(WIFI_MODE_APSTA);
     delay(100);
     bool apOk = WiFi.softAP(ssid, nullptr, channel);
+    if (!apOk) {
+        if (error) *error = "softAP creation failed";
+        return false;
+    }
     bool cfgOk = WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-
-    if (!apOk || !cfgOk) {
+    if (!cfgOk) {
+        if (error) *error = "softAP DHCP configuration failed";
         return false;
     }
 
     wifi_config_t cfg{};
-    if (esp_wifi_get_config(WIFI_IF_AP, &cfg) == ESP_OK) {
+    esp_err_t err = esp_wifi_get_config(WIFI_IF_AP, &cfg);
+    if (err == ESP_OK) {
         cfg.ap.channel = channel;
-        esp_wifi_set_config(WIFI_IF_AP, &cfg);
+        err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
     }
-    esp_wifi_start();
+    if (err != ESP_OK) {
+        if (error) {
+            *error = "AP channel configuration failed: ";
+            *error += esp_err_to_name(err);
+        }
+        return false;
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+        if (error) {
+            *error = "WiFi start failed: ";
+            *error += esp_err_to_name(err);
+        }
+        return false;
+    }
     delay(300);
 
     _server = new AsyncWebServer(80);

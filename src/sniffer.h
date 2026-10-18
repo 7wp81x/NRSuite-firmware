@@ -39,14 +39,14 @@ public:
     void begin(BridgeProtocol& proto);
     static Sniffer* instance() { return _instance; }
 
-    bool startFixed(uint8_t channel);
-    bool startHop(uint16_t intervalMs);
-    bool startClientFixed(uint8_t channel);
-    bool startClientHop(uint16_t intervalMs);
+    bool startFixed(uint8_t channel, bool include5ghz = false);
+    bool startHop(uint16_t intervalMs, bool include5ghz = false);
+    bool startClientFixed(uint8_t channel, bool include5ghz = false);
+    bool startClientHop(uint16_t intervalMs, bool include5ghz = false);
     void stop();
     bool setChannel(uint8_t channel);
 
-    void setEapolFilter(bool enable, const uint8_t bssid[6] = nullptr);
+    void setEapolFilter(bool enable, const uint8_t bssid[6] = nullptr, bool allBeacons = false);
 
     void processQueue();
     void handleHop();
@@ -69,12 +69,20 @@ private:
     uint8_t  _channel      = 1;
     uint16_t _hopIntervalMs = 300;
     uint32_t _lastHopMs    = 0;
+    bool     _include5ghz  = false;
+    const uint8_t* _hopChannels = nullptr;
+    uint8_t  _hopCount     = 0;
+    uint8_t  _hopIndex     = 0;
 
     volatile int _inFlight = 0;
     uint8_t      _chunkCtr = 0;
 
     bool    _eapolOnly      = false;
     bool    _beaconCaptured = false;
+    bool    _captureAllBeacons = false;
+    static const uint8_t MAX_BEACON_BSSIDS = 24;
+    uint8_t _beaconBssids[MAX_BEACON_BSSIDS][6] = {};
+    uint8_t _beaconBssidCount = 0;
     bool    _hasTargetBssid = false;
     uint8_t _targetBssid[6] = {0};
     
@@ -88,8 +96,9 @@ private:
     bool   isBeaconFrame(const wifi_promiscuous_pkt_t* pkt) const;
     bool   isAssociationRequest(const wifi_promiscuous_pkt_t* pkt) const;
     bool   matchesTargetBssid(const wifi_promiscuous_pkt_t* pkt) const;
-    bool   startFixedInternal(uint8_t channel, bool clientOnly);
-    bool   startHopInternal(uint16_t intervalMs, bool clientOnly);
+    bool   startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz);
+    bool   startHopInternal(uint16_t intervalMs, bool clientOnly, bool include5ghz);
+    bool   isValidChannel(uint8_t channel, bool include5ghz) const;
     void   processClientEvents();
     bool   enqueueClientEvent(wifi_promiscuous_pkt_t* pkt);
 };

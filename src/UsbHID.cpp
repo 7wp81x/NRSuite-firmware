@@ -44,6 +44,15 @@ void UsbHID::sendText(const String& text) {
     Keyboard.print(text);
 }
 
+void UsbHID::sendTextSlow(const String& text, uint16_t charDelayMs) {
+    for (size_t i = 0; i < text.length(); i++) {
+        Keyboard.print(text[i]);
+        if (charDelayMs > 0) delay(charDelayMs);
+    }
+    Keyboard.releaseAll();
+    if (charDelayMs > 0) delay(charDelayMs);
+}
+
 void UsbHID::pressEnter() {
     Keyboard.press(KEY_RETURN);
     delay(5);

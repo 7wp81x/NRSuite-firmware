@@ -2,6 +2,20 @@
 #include <esp_wifi.h>
 #include <WiFi.h>
 
+namespace {
+const uint8_t BEACON_5G_CHANNELS[] = {
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+bool isValidBeaconChannel(uint8_t channel) {
+    if (channel >= 1 && channel <= 14) return true;
+    for (uint8_t ch : BEACON_5G_CHANNELS) {
+        if (ch == channel) return true;
+    }
+    return false;
+}
+}
 void BeaconSpammer::begin(BridgeProtocol& proto) {
     _proto = &proto;
 }
@@ -143,7 +157,7 @@ void BeaconSpammer::_transmit(int idx) {
 
 bool BeaconSpammer::start(const String& ssids, uint8_t channel, uint16_t intervalMs,
                           bool randomizeBssid, bool hidden) {
-    if (channel < 1 || channel > 13) return false;
+    if (!isValidBeaconChannel(channel)) return false;
 
     stop();
 

@@ -7,6 +7,7 @@ NAME_MAP = {
     "esp32-c3":     "nrsuite-esp32c3.bin",
     "esp32-s3":     "nrsuite-esp32s3.bin",
     "esp32-s2":     "nrsuite-esp32s2.bin",
+    "esp32-c5":     "nrsuite-esp32-c5.bin",
 }
 
 BETA_NAME_MAP = {
@@ -14,14 +15,16 @@ BETA_NAME_MAP = {
     "esp32-c3":     "beta-nrsuite-esp32c3.bin",
     "esp32-s3":     "beta-nrsuite-esp32s3.bin",
     "esp32-s2":     "beta-nrsuite-esp32s2.bin",
+    "esp32-c5":     "beta-nrsuite-esp32-c5.bin",
 }
 
 # Bootloader load offset differs by chip family
 BOOT_OFFSET = {
-    "esp32":   "0x1000",  # classic ESP32 - different offset!
-    "esp32s2": "0x1000",
-    "esp32s3": "0x0",
-    "esp32c3": "0x0",
+    "esp32":    "0x1000",  # classic ESP32 - different offset!
+    "esp32s2":  "0x1000",
+    "esp32s3":  "0x0",
+    "esp32c3":  "0x0",
+    "esp32c5":  "0x2000",  # C5 bootloader starts at 0x2000
 }
 
 def merge_bin_action(source, target, env):

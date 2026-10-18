@@ -14,9 +14,23 @@ struct RadiotapHeader {
 };
 #pragma pack(pop)
 
+static const uint8_t WIFI_2G_CHANNELS[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+static const uint8_t WIFI_5G_CHANNELS[] = {
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+static const uint8_t WIFI_AUTO_CHANNELS[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+
 static uint16_t channelToFreqMHz(uint8_t ch) {
     if (ch >= 1 && ch <= 13) return 2407 + ch * 5;
     if (ch == 14) return 2484;
+    if (ch >= 36) return 5000 + ch * 5;
     return 2412;
 }
 
@@ -45,25 +59,37 @@ size_t Sniffer::buildRadiotap(uint8_t* out, uint8_t channel, int8_t rssi) {
 }
 
 // ── startFixed / startHop / stop / setChannel ─────────────────────────────
-bool Sniffer::startFixed(uint8_t channel) {
-    return startFixedInternal(channel, false);
+bool Sniffer::startFixed(uint8_t channel, bool include5ghz) {
+    return startFixedInternal(channel, false, include5ghz);
 }
 
-bool Sniffer::startHop(uint16_t intervalMs) {
-    return startHopInternal(intervalMs, false);
+bool Sniffer::startHop(uint16_t intervalMs, bool include5ghz) {
+    return startHopInternal(intervalMs, false, include5ghz);
 }
 
-bool Sniffer::startClientFixed(uint8_t channel) {
-    return startFixedInternal(channel, true);
+bool Sniffer::startClientFixed(uint8_t channel, bool include5ghz) {
+    return startFixedInternal(channel, true, include5ghz);
 }
 
-bool Sniffer::startClientHop(uint16_t intervalMs) {
-    return startHopInternal(intervalMs, true);
+bool Sniffer::startClientHop(uint16_t intervalMs, bool include5ghz) {
+    return startHopInternal(intervalMs, true, include5ghz);
 }
 
-bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly) {
-    if (channel < 1 || channel > 13) return false;
+bool Sniffer::isValidChannel(uint8_t channel, bool include5ghz) const {
+    for (uint8_t ch : WIFI_2G_CHANNELS) {
+        if (ch == channel) return true;
+    }
+    if (!include5ghz) return false;
+    for (uint8_t ch : WIFI_5G_CHANNELS) {
+        if (ch == channel) return true;
+    }
+    return false;
+}
+
+bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz) {
+    if (!isValidChannel(channel, include5ghz)) return false;
     _clientOnly = clientOnly;
+    _include5ghz = include5ghz;
 
     wifi_promiscuous_filter_t filter;
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
@@ -86,8 +112,13 @@ bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly) {
     return true;
 }
 
-bool Sniffer::startHopInternal(uint16_t intervalMs, bool clientOnly) {
-    if (!startFixedInternal(1, clientOnly)) return false;
+bool Sniffer::startHopInternal(uint16_t intervalMs, bool clientOnly, bool include5ghz) {
+    _hopChannels = include5ghz ? WIFI_AUTO_CHANNELS : WIFI_2G_CHANNELS;
+    _hopCount = include5ghz
+        ? (uint8_t)(sizeof(WIFI_AUTO_CHANNELS) / sizeof(WIFI_AUTO_CHANNELS[0]))
+        : (uint8_t)(sizeof(WIFI_2G_CHANNELS) / sizeof(WIFI_2G_CHANNELS[0]));
+    _hopIndex = 0;
+    if (!startFixedInternal(_hopChannels[0], clientOnly, include5ghz)) return false;
     _hopMode = true;
     _hopIntervalMs = intervalMs;
     _lastHopMs = millis();
@@ -104,7 +135,7 @@ void Sniffer::stop() {
 }
 
 bool Sniffer::setChannel(uint8_t channel) {
-    if (channel < 1 || channel > 13) return false;
+    if (!isValidChannel(channel, _include5ghz)) return false;
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     _channel = channel;
     return true;
@@ -113,17 +144,22 @@ bool Sniffer::setChannel(uint8_t channel) {
 void Sniffer::handleHop() {
     if (!_active || !_hopMode) return;
     if (millis() - _lastHopMs < _hopIntervalMs) return;
+    if (!_hopChannels || _hopCount == 0) return;
     _lastHopMs = millis();
-    _channel = (_channel % 13) + 1;
+    _hopIndex = (uint8_t)((_hopIndex + 1) % _hopCount);
+    _channel = _hopChannels[_hopIndex];
     esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
 }
 
 // ── Filter ────────────────────────────────────────────────────────────────
-void Sniffer::setEapolFilter(bool enable, const uint8_t bssid[6]) {
+void Sniffer::setEapolFilter(bool enable, const uint8_t bssid[6], bool allBeacons) {
     _eapolOnly = enable;
+    _captureAllBeacons = allBeacons;
     _hasTargetBssid = (bssid != nullptr && enable);
     if (_hasTargetBssid) memcpy(_targetBssid, bssid, 6);
     _beaconCaptured = false;
+    _beaconBssidCount = 0;
+    memset(_beaconBssids, 0, sizeof(_beaconBssids));
 }
 
 bool Sniffer::isEapolFrame(const wifi_promiscuous_pkt_t* pkt) const {
@@ -293,9 +329,24 @@ void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
         if (!_hasTargetBssid || matchesTargetBssid(pkt)) {
             if (isEapolFrame(pkt)) {
                 shouldCapture = true;
-            } else if (isBeaconFrame(pkt) && !_beaconCaptured) {
-                shouldCapture = true;
-                _beaconCaptured = true;
+            } else if (isBeaconFrame(pkt)) {
+                const uint8_t* beaconBssid = pkt->payload + 16;
+                bool alreadyCaptured = false;
+                for (uint8_t i = 0; i < _beaconBssidCount; i++) {
+                    if (memcmp(_beaconBssids[i], beaconBssid, 6) == 0) {
+                        alreadyCaptured = true;
+                        break;
+                    }
+                }
+                if (_captureAllBeacons) {
+                    if (!alreadyCaptured && _beaconBssidCount < MAX_BEACON_BSSIDS) {
+                        shouldCapture = true;
+                        memcpy(_beaconBssids[_beaconBssidCount++], beaconBssid, 6);
+                    }
+                } else if (!_beaconCaptured) {
+                    shouldCapture = true;
+                    _beaconCaptured = true;
+                }
             }
         }
     } else {

