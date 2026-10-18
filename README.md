@@ -40,6 +40,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Wi-Fi Scan | All (C5: 2.4/5 GHz) | Active AP scan with SSID, BSSID, channel, RSSI, security type; AUTO band mode on C5 |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
+| Firmware Release Assets | All | Merged release images for ESP32-C5, C3, S3, S2, and classic ESP32; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection, broadcast or targeted |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
@@ -121,7 +122,7 @@ pio run -e esp32-devkit
 Build all targets:
 
 ```bash
-pio run -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
+pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
 ```
 
 ### LD2450 standalone serial bring-up
