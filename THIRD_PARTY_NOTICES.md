@@ -10,6 +10,8 @@ Notable dependencies include:
 - ArduinoJson — MIT
 - AsyncTCP and ESPAsyncWebServer — LGPL-3.0
 - NimBLE-Arduino — Apache License 2.0
+- Adafruit PN532 — BSD 3-Clause — https://github.com/adafruit/Adafruit-PN532
+- Adafruit BusIO — MIT — https://github.com/adafruit/Adafruit_BusIO
 - HijelHID_BLEKeyboard — Apache License 2.0
 - Other PlatformIO dependencies retain the licenses declared by their upstream
   projects.

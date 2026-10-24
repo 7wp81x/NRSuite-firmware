@@ -142,11 +142,11 @@ jobs:
 
             | Board | Environment | Binary pattern |
             |---|---|---|
-            | ESP32-C5 DevKitC-1 | `esp32-c5` | `nrsuite-esp32-c5-*.bin` |
+            | ESP32-C5 DevKitC-1 | `esp32-c5` | `nrsuite-esp32c5-*.bin` |
             | ESP32-C3 DevKitM-1 | `esp32-c3` | `nrsuite-esp32c3-*.bin` |
             | ESP32-S3 DevKitC-1 | `esp32-s3` | `nrsuite-esp32s3-*.bin` |
             | ESP32-S2 Saola-1 | `esp32-s2` | `nrsuite-esp32s2-*.bin` |
-            | ESP32 DevKit | `esp32-devkit` | `nrsuite-esp32-generic-*.bin` |
+            | ESP32 DevKit | `esp32-devkit` | `nrsuite-esp32classic-*.bin` |
 
             > Alpha/beta/RC tags use the same names with a `beta-` prefix.
             > The C5 merged image starts at flash offset `0x0` and contains its

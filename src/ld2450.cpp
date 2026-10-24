@@ -2,6 +2,9 @@
 
 bool Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin,
                    bool debugPrint) {
+    if (_serial != nullptr) {
+        _serial->end();
+    }
     _serial = &serial;
     _debugPrint = debugPrint;
     _serial->begin(baud, SERIAL_8N1, rxPin, txPin);
@@ -39,6 +42,10 @@ void Ld2450::stop() {
     resetParser();
     _targetCount = 0;
     resetTargets();
+    if (_serial != nullptr) {
+        _serial->end();
+        _serial = nullptr;
+    }
     if (_debugPrint) {
         Serial.println("[LD2450] stopped");
     }

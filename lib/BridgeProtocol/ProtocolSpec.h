@@ -7,7 +7,7 @@
 #define PROTO_MAGIC_0   0xAD
 #define PROTO_MAGIC_1   0xDE
 #define PROTO_HEADER_SZ 8       // 2 magic + 1 type + 1 id + 4 length
-#define PROTO_MAX_CHUNK 1024
+#define PROTO_MAX_CHUNK 4096
 
 #define TYPE_CMD    0x01
 #define TYPE_RESP   0x02
