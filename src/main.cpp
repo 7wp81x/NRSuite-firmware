@@ -10,6 +10,8 @@
 #include "mesh.h"
 #include "pin_bruteforce.h"
 #include "ld2450.h"
+#include "ir_remote.h"
+#include "pn532_nfc.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -63,6 +65,8 @@ DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
 MeshManager    mesh;
 Ld2450         ld2450;
+IrRemote       irRemote;
+Pn532Nfc       pn532Nfc;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -469,6 +473,9 @@ static void stopRadioModules() {
 static void stopAllModules() {
     pinBruteforce.stop();
     ld2450.stop();
+    irRemote.stopRx();
+    irRemote.stopTx();
+    pn532Nfc.stopScan();
     stopRadioModules();
     #ifdef ENABLE_BLE_HID
         bleProfile.stop();
@@ -493,14 +500,97 @@ static void radioIdle() {
 
 // ── LD2450 command/event layer ────────────────────────────────────────────────
 static constexpr uint32_t LD2450_BAUD = 256000;
-static constexpr int8_t LD2450_RX_PIN = 16;
-static constexpr int8_t LD2450_TX_PIN = 17;
+static constexpr int8_t LD2450_DEFAULT_RX_PIN = 16;
+static constexpr int8_t LD2450_DEFAULT_TX_PIN = 17;
 
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+static const int SAFE_LD2450_GPIOS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+#elif defined(CONFIG_IDF_TARGET_ESP32C5)
+static const int SAFE_LD2450_GPIOS[] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 22, 23, 24, 25, 26, 27, 28,
+};
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+static const int SAFE_LD2450_GPIOS[] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    21, 38, 39, 40, 41, 42, 45, 46, 47, 48,
+};
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
+static const int SAFE_LD2450_GPIOS[] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    21, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 45,
+};
+#else
+static const int SAFE_LD2450_GPIOS[] = {
+    4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33,
+};
+#endif
+static constexpr size_t SAFE_LD2450_GPIO_COUNT =
+    sizeof(SAFE_LD2450_GPIOS) / sizeof(SAFE_LD2450_GPIOS[0]);
+
+static int ld2450RxGpio = -1;
+static int ld2450TxGpio = -1;
 static uint32_t ld2450StartedMs = 0;
 static uint32_t ld2450LastTargetsFrame = 0;
 static uint32_t ld2450LastErrorEventMs = 0;
 static uint32_t ld2450LastInvalidFrames = 0;
 static bool ld2450LastPresence = false;
+
+static bool isSafeLd2450Pin(int gpio) {
+    for (size_t i = 0; i < SAFE_LD2450_GPIO_COUNT; i++) {
+        if (SAFE_LD2450_GPIOS[i] == gpio) return true;
+    }
+    return false;
+}
+
+static void loadLd2450Config() {
+    int rxPin = LD2450_DEFAULT_RX_PIN;
+    int txPin = LD2450_DEFAULT_TX_PIN;
+    Preferences prefs;
+    if (prefs.begin("nrsuite", true)) {
+        rxPin = prefs.getInt("ld2450_rx_gpio", LD2450_DEFAULT_RX_PIN);
+        txPin = prefs.getInt("ld2450_tx_gpio", LD2450_DEFAULT_TX_PIN);
+        prefs.end();
+    }
+    ld2450RxGpio = isSafeLd2450Pin(rxPin) ? rxPin : -1;
+    ld2450TxGpio = isSafeLd2450Pin(txPin) ? txPin : -1;
+    if (ld2450RxGpio == ld2450TxGpio) {
+        ld2450RxGpio = -1;
+        ld2450TxGpio = -1;
+    }
+}
+
+static void saveLd2450Config() {
+    Preferences prefs;
+    if (!prefs.begin("nrsuite", false)) return;
+    prefs.putInt("ld2450_rx_gpio", ld2450RxGpio);
+    prefs.putInt("ld2450_tx_gpio", ld2450TxGpio);
+    prefs.end();
+}
+
+static void appendLd2450PinOptions(JsonDocument& doc) {
+    JsonArray rxPins = doc["ld2450_rx_gpios"].to<JsonArray>();
+    JsonArray txPins = doc["ld2450_tx_gpios"].to<JsonArray>();
+    for (size_t i = 0; i < SAFE_LD2450_GPIO_COUNT; i++) {
+        rxPins.add(SAFE_LD2450_GPIOS[i]);
+        txPins.add(SAFE_LD2450_GPIOS[i]);
+    }
+}
+
+static bool validateLd2450Pins(int rxPin, int txPin, String& error) {
+    if (!isSafeLd2450Pin(rxPin)) {
+        error = "Unsupported or unsafe LD2450 RX GPIO";
+        return false;
+    }
+    if (!isSafeLd2450Pin(txPin)) {
+        error = "Unsupported or unsafe LD2450 TX GPIO";
+        return false;
+    }
+    if (rxPin == txPin) {
+        error = "LD2450 RX and TX GPIOs must be different";
+        return false;
+    }
+    return true;
+}
 
 static void resetLd2450EventTracking() {
     ld2450StartedMs = millis();
@@ -524,8 +614,11 @@ static void appendLd2450Status(JsonDocument& doc) {
     doc["last_frame_ms"] = lastFrameMs;
     doc["uptime_ms"] = now;
     doc["baud"] = LD2450_BAUD;
-    doc["rx_pin"] = LD2450_RX_PIN;
-    doc["tx_pin"] = LD2450_TX_PIN;
+    doc["rx_pin"] = ld2450RxGpio;
+    doc["tx_pin"] = ld2450TxGpio;
+    doc["configured"] = isSafeLd2450Pin(ld2450RxGpio) &&
+        isSafeLd2450Pin(ld2450TxGpio) &&
+        ld2450RxGpio != ld2450TxGpio;
     if (lastFrameMs > 0) {
         doc["last_frame_age_ms"] = now >= lastFrameMs ? (now - lastFrameMs) : 0;
     } else {
@@ -538,6 +631,7 @@ static void sendLd2450StatusResp(uint8_t id, bool ok = true, const char* msg = n
     resp["ok"] = ok;
     if (msg) resp["msg"] = msg;
     appendLd2450Status(resp);
+    appendLd2450PinOptions(resp);
     String json;
     serializeJson(resp, json);
     proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -606,6 +700,33 @@ static void emitLd2450Events() {
 }
 
 // ── Command Handler ──────────────────────────────────────────────────────────
+static void sendIrStatusResp(uint8_t id, bool ok, const char* msg = nullptr) {
+    JsonDocument resp;
+    resp["ok"] = ok;
+    if (msg != nullptr) resp["msg"] = msg;
+    irRemote.appendStatus(resp);
+    irRemote.appendPinOptions(resp);
+    String json;
+    serializeJson(resp, json);
+    proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+}
+
+static void sendRfidStatusResp(
+    uint8_t id,
+    bool ok,
+    const char* msg = nullptr,
+    const String* detail = nullptr
+) {
+    JsonDocument resp;
+    resp["ok"] = ok;
+    if (msg != nullptr) resp["msg"] = msg;
+    if (detail != nullptr && !detail->isEmpty()) resp["detail"] = *detail;
+    pn532Nfc.appendStatus(resp);
+    String json;
+    serializeJson(resp, json);
+    proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+}
+
 void handleCmd(uint8_t id, JsonDocument& doc) {
     const char* cmd = doc["cmd"] | "";
     if (cmd[0] == '\0') {
@@ -698,6 +819,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("hidden_ap");
         features.add("storage");
         features.add("ld2450");
+        features.add("ir_tx");
+        features.add("ir_rx");
+        features.add("nfc");
+        features.add("rfid");
+        features.add("pn532");
         // Capability flag: mesh code is present and can be provisioned.
         features.add("mesh_provision");
         // Availability flag: only advertised once valid derived keys exist.
@@ -721,6 +847,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["sniffing"] = sniffer.active();
         resp["client_detecting"] = sniffer.active() && sniffer.clientOnly();
         resp["oversized_frames"] = proto.oversizedFrameCount();
+        irRemote.appendStatus(resp);
+        irRemote.appendPinOptions(resp);
         if (sniffer.active()) {
             resp["channel"] = sniffer.channel();
         }
@@ -760,16 +888,151 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+    // ── IR REMOTE ─────────────────────────────────────────────────────────
+    else if (strcmp(cmd, "IR_STATUS") == 0) {
+        sendIrStatusResp(id, true, "ir status");
+    }
+
+    else if (strcmp(cmd, "IR_SET_PINS") == 0) {
+        const int txGpio = doc["args"]["tx_gpio"] | -1;
+        const int rxGpio = doc["args"]["rx_gpio"] | -1;
+        String error;
+        if (!irRemote.setPins(txGpio, rxGpio, error)) {
+            sendIrStatusResp(id, false, error.c_str());
+        } else {
+            sendIrStatusResp(id, true, "ir pins saved");
+        }
+    }
+
+    else if (strcmp(cmd, "IR_RX_START") == 0) {
+        String error;
+        if (!irRemote.startRx(error)) {
+            sendIrStatusResp(id, false, error.c_str());
+        } else {
+            sendIrStatusResp(id, true, "ir rx started");
+        }
+    }
+
+    else if (strcmp(cmd, "IR_RX_STOP") == 0) {
+        irRemote.stopRx();
+        sendIrStatusResp(id, true, "ir rx stopped");
+    }
+
+    else if (strcmp(cmd, "IR_TX_STOP") == 0) {
+        irRemote.stopTx();
+        sendIrStatusResp(id, true, "ir tx stopped");
+    }
+
+    else if (strcmp(cmd, "IR_TX_RAW") == 0) {
+        const uint32_t frequencyHz = doc["args"]["frequency_hz"] | 38000;
+        const int repeat = doc["args"]["repeat"] | 1;
+        JsonArray timings = doc["args"]["timings_us"].as<JsonArray>();
+        String error;
+        size_t timingCount = 0;
+        if (!irRemote.transmitRaw(frequencyHz, repeat, timings, error, timingCount)) {
+            sendIrStatusResp(id, false, error.c_str());
+        } else {
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["msg"] = "ir tx sent";
+            resp["timings"] = timingCount;
+            irRemote.appendStatus(resp);
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+        }
+    }
+
     // ── STOP_ALL ──────────────────────────────────────────────────────────
     else if (strcmp(cmd, "STOP_ALL") == 0) {
         stopAllModules();
         proto.sendResp(id, true, "all modules stopped");
     }
 
+    // ── PN532 NFC / RFID ──────────────────────────────────────────────────
+    else if (strcmp(cmd, "RFID_STATUS") == 0) {
+        String detail;
+        if (!pn532Nfc.connected() && pn532Nfc.configured()) {
+            pn532Nfc.ensureConnected(detail);
+        }
+        sendRfidStatusResp(
+            id,
+            true,
+            detail.isEmpty() ? "rfid status" : detail.c_str(),
+            &detail
+        );
+    }
+
+    else if (strcmp(cmd, "RFID_SET_CONFIG") == 0) {
+        const char* interfaceName = doc["args"]["interface"] | "i2c";
+        const int sdaGpio = doc["args"]["sda_gpio"] | -1;
+        const int sclGpio = doc["args"]["scl_gpio"] | -1;
+        String error;
+        const bool configSaved = pn532Nfc.setConfig(
+            interfaceName,
+            sdaGpio,
+            sclGpio,
+            error
+        );
+        JsonDocument resp;
+        resp["ok"] = configSaved;
+        resp["config_saved"] = configSaved;
+        resp["detection_ok"] = pn532Nfc.connected();
+        if (!configSaved) {
+            resp["msg"] = error;
+        } else if (!pn532Nfc.connected() && !error.isEmpty()) {
+            resp["msg"] = String("Configuration saved, but ") + error;
+        } else {
+            resp["msg"] = "rfid config saved";
+        }
+        pn532Nfc.appendStatus(resp);
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "RFID_SCAN_START") == 0) {
+        String error;
+        const bool ok = pn532Nfc.startScan(error);
+        sendRfidStatusResp(id, ok, ok ? "rfid scanning started" : error.c_str());
+    }
+
+    else if (strcmp(cmd, "RFID_SCAN_STOP") == 0) {
+        pn532Nfc.stopScan();
+        sendRfidStatusResp(id, true, "rfid scanning stopped");
+    }
+
     // ── LD2450 MM-WAVE RADAR ──────────────────────────────────────────────
+    else if (strcmp(cmd, "LD2450_SET_CONFIG") == 0) {
+        const int rxPin = doc["args"]["rx_gpio"] | -1;
+        const int txPin = doc["args"]["tx_gpio"] | -1;
+        String error;
+        const bool ok = validateLd2450Pins(rxPin, txPin, error);
+        if (ok) {
+            ld2450.stop();
+            ld2450RxGpio = rxPin;
+            ld2450TxGpio = txPin;
+            saveLd2450Config();
+            resetLd2450EventTracking();
+        }
+        sendLd2450StatusResp(id, ok, ok ? "ld2450 config saved" : error.c_str());
+    }
+
     else if (strcmp(cmd, "LD2450_START") == 0) {
+        String error;
+        if (!validateLd2450Pins(ld2450RxGpio, ld2450TxGpio, error)) {
+            sendLd2450StatusResp(id, false, error.c_str());
+            return;
+        }
         const bool debug = doc["args"]["debug"] | false;
-        bool ok = ld2450.begin(Serial1, LD2450_BAUD, LD2450_RX_PIN, LD2450_TX_PIN, debug);
+        ld2450.stop();
+        bool ok = ld2450.begin(
+            Serial1,
+            LD2450_BAUD,
+            ld2450RxGpio,
+            ld2450TxGpio,
+            debug
+        );
         resetLd2450EventTracking();
         sendLd2450StatusResp(id, ok, ok ? "ld2450 started" : "ld2450 start failed");
     }
@@ -2411,10 +2674,15 @@ void setup() {
     Serial.begin(115200);
     delay(150);
 
+    loadLd2450Config();
+
     #if LD2450_BOOT_START
         // Devkit bring-up: UART2 defaults for classic ESP32 devkit.
-        ld2450.begin(Serial1, LD2450_BAUD, LD2450_RX_PIN, LD2450_TX_PIN,
-                     LD2450_BOOT_DEBUG);
+        String pinError;
+        if (validateLd2450Pins(ld2450RxGpio, ld2450TxGpio, pinError)) {
+            ld2450.begin(Serial1, LD2450_BAUD, ld2450RxGpio, ld2450TxGpio,
+                         LD2450_BOOT_DEBUG);
+        }
     #endif
 
     #if defined(CONFIG_IDF_TARGET_ESP32S2)
@@ -2476,6 +2744,8 @@ void setup() {
     hiddenApDetector.begin(proto);
     mesh.begin(proto, getDeviceId().c_str(), CHIP_NAME);
     pinBruteforce.begin(proto);
+    irRemote.begin(proto);
+    pn532Nfc.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -2502,6 +2772,8 @@ void loop() {
     #endif
     ld2450.update();
     emitLd2450Events();
+    irRemote.update();
+    pn532Nfc.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();

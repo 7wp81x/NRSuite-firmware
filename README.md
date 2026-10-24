@@ -1,10 +1,53 @@
 # NRSuite Firmware
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
+[![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
+[![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
+[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3-yellow.svg)](../../releases)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
+
 **ESP32 firmware for the NRSuite security research toolkit.**
 
-This firmware runs on the ESP32 and communicates with the [NRSuite Android app](https://github.com/7wp81x/nrsuite-android) over USB serial. It handles all radio-level operations: Wi-Fi scanning, monitor-mode packet capture, deauthentication, beacon injection, captive portal, BLE HID, BadUSB, and mass storage -- with more modules planned.
+This firmware runs on the ESP32 and communicates with the [NRSuite Android app](https://github.com/7wp81x/nrsuite-android) over USB serial. It handles all radio-level operations: Wi-Fi scanning, monitor-mode packet capture, deauthentication, beacon injection, captive portal, BLE HID, BadUSB, and mass storage, with more modules planned.
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
+
+**Current release line:** `1.0.0-beta.3`. Mesh support from merged mesh branches is present but experimental.
+
+---
+
+## Quick Start
+
+```bash
+pip install platformio
+git clone https://github.com/7wp81x/nrsuite-firmware.git
+cd nrsuite-firmware
+pio run -e esp32-c3          # build for the recommended default board
+pio run -e esp32-c3 --target upload   # flash over USB
+```
+
+Prefer flashing from your phone? Use the built-in flasher in the [NRSuite Android app](https://github.com/7wp81x/nrsuite-android) instead, see [Flashing](#flashing).
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Community](#community)
+- [Supported Boards](#supported-boards)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Building](#building)
+- [Flashing](#flashing)
+- [Running Tests](#running-tests)
+- [Project Structure](#project-structure)
+- [Wire Protocol](#wire-protocol)
+- [Feature Flags](#feature-flags)
+- [Contributing](#contributing)
+- [Related Repos](#related-repos)
+- [Versioning and Compatibility](#versioning-and-compatibility)
+- [Security](#security)
+- [License](#license)
 
 ---
 
@@ -23,6 +66,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Board | MCU | Native USB | BLE | BadUSB / MSC | Environment |
 |---|---|---|---|---|---|
 | ESP32-C3 DevKitM-1 | ESP32-C3 | Yes (CDC) | Yes | No | `esp32-c3` |
+| ESP32-C5 DevKitC-1 | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5` |
 | ESP32-S3 DevKitC-1 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3` |
 | ESP32-S2 Saola-1 | ESP32-S2 | Yes (TinyUSB) | No | Yes | `esp32-s2` |
 | ESP32 DevKit | ESP32 | No (needs CP2102/CH340) | Yes | No | `esp32-devkit` |
@@ -33,14 +77,14 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 ## Features
 
-### Current (in development)
+### Current
 
 | Module | Supported Boards | Description |
 |---|---|---|
 | Wi-Fi Scan | All (C5: 2.4/5 GHz) | Active AP scan with SSID, BSSID, channel, RSSI, security type; AUTO band mode on C5 |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
-| Firmware Release Assets | All | Merged release images for ESP32-C5, C3, S3, S2, and classic ESP32; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
+| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or stoppable duration-based loop mode, plus capture-preserving `DEAUTH_BURST` retries |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
@@ -54,7 +98,8 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage; NVS fallback when FAT is unavailable |
 | PIN Bruteforce | S2, S3 | Supervised native-HID range/wordlist tester; one-shot boot-arm like BadUSB; max-attempt safety cap, progress/ETA, configurable typing/start delays, session persistence; native HID only |
 | BLE HID PIN Bruteforce | C3, C5, S3, DevKit | Hidden/experimental: live CDC-controlled BLE HID PIN tester retained for future use; lock-screen use unsupported |
-| LD2450 mmWave Radar | All | UART 256000 target parser, sign-magnitude decode, serial bring-up, `LD2450_START/STOP/STATUS` commands, and target/presence/error events |
+| IR TX/RX | All | RMT-based raw IR transmit/receive with dynamic GPIO configuration, NVS persistence, JSON timing transport, and IR RX events |
+| LD2450 mmWave Radar | All | UART 256000 target parser, sign-magnitude decode, dynamic RX/TX GPIO configuration, NVS persistence, `LD2450_START/STOP/STATUS/SET_CONFIG`, and target/presence/error events |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
 | Heartbeat | All | Periodic uptime and free heap event to the app |
 | Persistent Device ID | All | First-boot NVS-generated `NRxxxxxxx` exposed in `STATUS.device_id` |
@@ -64,12 +109,37 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > The regulatory country is configured from Android Settings and enforced by
 > the firmware channel mask.
 
+### Experimental Mesh (ESP-NOW)
+
+> Mesh is experimental and is not part of the non-mesh release acceptance matrix. Protocol and behavior may change.
+
+Implemented:
+
+- [x] Shared group-key provisioning over USB
+- [x] HKDF-SHA256 auth/transport key derivation
+- [x] NVS credential storage
+- [x] USB authentication challenge/response
+- [x] Dynamic master election and client self-demotion
+- [x] Client standby/auto-listen after reboot
+- [x] AES-CCM encrypted ESP-NOW transport and replay protection
+- [x] Heartbeat, timeout, session locking, and peer snapshots
+- [x] Peer chip metadata and RSSI/online state
+- [x] Configurable channel `1..13`, recovery hopping, and ACK/commit channel switching
+- [x] Generic distributed sensor reports and `node_health`
+- [x] Distributed same-channel Deauth Detector reporting (hardware-validated on S3 + S2)
+- [ ] Fixed/hop detector windows final hardware validation
+- [ ] Same-frame deauth correlation
+- [ ] Distributed Rogue AP evidence
+- [ ] RSSI locator / multilateration
+- [ ] Mesh chat, fragmentation, and multi-hop relay
+- [ ] ESP32-CAM remote node
+- [ ] LoRa relay
+
 ### Planned (see [FEATURES.md](./FEATURES.md))
-- FastPair Model Identification: map FastPair model IDs to known device names/types
-- ESP-NOW mesh: multi-node activation, distributed sensing, triangulation
-- Mesh chat
+- FastPair Model Identification: map FastPair model IDs to known device names/types (parked until test hardware is available)
+- Mesh chat and multi-hop messaging
 - Remote camera support (ESP32-CAM node)
-- Sub-GHz, nRF24, RFID/NFC, IR peripheral modules
+- Sub-GHz, nRF24, and RFID/NFC peripheral modules
 - LoRa long-range relay node
 
 ---
@@ -196,6 +266,9 @@ src/
   pin_bruteforce.cpp/h # Supervised native-HID PIN range/wordlist tester
   ble_pin_bruteforce.cpp/h # Live BLE HID PIN range/wordlist tester
   ld2450.cpp/h         # HLK-LD2450 mmWave radar UART parser and event counters
+  ir_remote.cpp/h      # ESP32 RMT IR TX/RX and dynamic GPIO configuration
+  mesh.cpp/h           # Experimental encrypted ESP-NOW mesh transport
+  pn532_nfc.cpp/h      # Hidden/disabled PN532 NFC prototype
   mass_storage.cpp/h   # USB MSC + FAT filesystem (S2, S3)
   FileUpload.cpp/h     # Chunked file upload to mass storage
   override_sanity.cpp  # ieee80211 raw frame sanity check override (required for frame injection)
@@ -269,7 +342,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.2 | v1.0.0-beta.2 | v1.0 |
+| v1.0.0-beta.3 | v1.0.0-beta.3 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
 
