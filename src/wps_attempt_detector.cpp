@@ -163,15 +163,7 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
 
     const uint8_t* eapol = frame + eapolOffset;
     const size_t available = length - eapolOffset;
-    wps::EapWscFrame wscFrame;
-    if (!wps::parseEapolWsc(eapol, available, wscFrame)) return;
-
-    wps::WpsAttributes attributes;
-    if (!attributes.parse(wscFrame.wps_data, wscFrame.wps_length)) return;
-    const wps::WpsAttribute* messageType = attributes.find(wps::ATTR_MESSAGE_TYPE);
-    if (messageType == nullptr || messageType->length < 1) return;
-    const char* stageName = stageNameForMessage(messageType->value[0]);
-    if (stageName == nullptr) return;
+    if (available < 4 || eapol[1] != 0x00) return;
 
     const uint8_t frameControl1 = frame[1];
     const bool toDs = (frameControl1 & 0x01) != 0;
@@ -187,6 +179,34 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
         client = frame + 4;
         bssid = frame + 10;
     }
+
+    // EAP-Request/Response Identity is a useful early signal, especially when
+    // immediately followed by WSC M1. Keep it as a low-risk observed session.
+    if (available >= 9) {
+        const uint8_t* eap = eapol + 4;
+        const uint16_t eapLength = wps::readBe16(eap + 2);
+        if (eapLength >= 5 && eapLength <= available - 4 && eap[4] == 0x01) {
+            enqueueAttempt(
+                bssid,
+                client,
+                pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : channel_,
+                pkt->rx_ctrl.rssi,
+                1,
+                "Identity"
+            );
+            return;
+        }
+    }
+
+    wps::EapWscFrame wscFrame;
+    if (!wps::parseEapolWsc(eapol, available, wscFrame)) return;
+
+    wps::WpsAttributes attributes;
+    if (!attributes.parse(wscFrame.wps_data, wscFrame.wps_length)) return;
+    const wps::WpsAttribute* messageType = attributes.find(wps::ATTR_MESSAGE_TYPE);
+    if (messageType == nullptr || messageType->length < 1) return;
+    const char* stageName = stageNameForMessage(messageType->value[0]);
+    if (stageName == nullptr) return;
 
     enqueueAttempt(
         bssid,
