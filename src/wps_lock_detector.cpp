@@ -183,6 +183,46 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs) {
     esp_wifi_set_promiscuous_rx_cb(nullptr);
     currentChannel_ = 0;
 
+    // Resolve SSIDs with a normal active scan. This does not perform a WPS
+    // exchange; it only fills in SSIDs for APs whose beacon/probe response was
+    // captured without an SSID element.
+    wifi_scan_config_t scanConfig = {};
+    scanConfig.show_hidden = true;
+    scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    scanConfig.scan_time.active.min = 100;
+    scanConfig.scan_time.active.max = 300;
+    if (esp_wifi_scan_start(&scanConfig, true) == ESP_OK) {
+        uint16_t apCount = 0;
+        if (esp_wifi_scan_get_ap_num(&apCount) == ESP_OK && apCount > 0) {
+            wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
+                apCount * sizeof(wifi_ap_record_t)
+            );
+            if (records != nullptr) {
+                uint16_t fetched = apCount;
+                if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
+                    for (size_t index = 0; index < recordCount_; ++index) {
+                        for (uint16_t ap = 0; ap < fetched; ++ap) {
+                            if (memcmp(records_[index].bssid, records[ap].bssid, 6) != 0) {
+                                continue;
+                            }
+                            if (records[ap].ssid[0] != '\0') {
+                                strncpy(
+                                    records_[index].ssid,
+                                    (const char*)records[ap].ssid,
+                                    sizeof(records_[index].ssid) - 1
+                                );
+                                records_[index].ssid[sizeof(records_[index].ssid) - 1] = '\0';
+                            }
+                            break;
+                        }
+                    }
+                }
+                free(records);
+            }
+        }
+        esp_wifi_scan_stop();
+    }
+
     if (proto_ == nullptr) return 0;
     int emitted = 0;
     for (size_t index = 0; index < recordCount_; ++index) {

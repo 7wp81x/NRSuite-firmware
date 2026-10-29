@@ -35,6 +35,17 @@ bool isQosDataFrame(uint8_t frameControl0) {
         (((frameControl0 >> 4) & 0x0f) & 0x08) != 0;
 }
 
+uint8_t findWscMessageType(const uint8_t* data, size_t length) {
+    if (data == nullptr || length < 5) return 0;
+    for (size_t index = 0; index + 5 <= length; ++index) {
+        if (data[index] == 0x10 && data[index + 1] == 0x22 &&
+            data[index + 2] == 0x00 && data[index + 3] == 0x01) {
+            return data[index + 4];
+        }
+    }
+    return 0;
+}
+
 void formatMac(char out[18], const uint8_t mac[6]) {
     snprintf(
         out,
@@ -199,14 +210,43 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
         }
     }
 
-    wps::EapWscFrame wscFrame;
-    if (!wps::parseEapolWsc(eapol, available, wscFrame)) return;
+    uint8_t messageTypeValue = 0;
 
-    wps::WpsAttributes attributes;
-    if (!attributes.parse(wscFrame.wps_data, wscFrame.wps_length)) return;
-    const wps::WpsAttribute* messageType = attributes.find(wps::ATTR_MESSAGE_TYPE);
-    if (messageType == nullptr || messageType->length < 1) return;
-    const char* stageName = stageNameForMessage(messageType->value[0]);
+    // Prefer the strict parser when the frame is a complete, well-formed
+    // EAP-WSC message.
+    wps::EapWscFrame wscFrame;
+    if (wps::parseEapolWsc(eapol, available, wscFrame)) {
+        wps::WpsAttributes attributes;
+        if (attributes.parse(wscFrame.wps_data, wscFrame.wps_length)) {
+            const wps::WpsAttribute* messageType = attributes.find(wps::ATTR_MESSAGE_TYPE);
+            if (messageType != nullptr && messageType->length >= 1) {
+                messageTypeValue = messageType->value[0];
+            }
+        }
+    }
+
+    // Fallback: some APs send fragmented or vendor-padded WSC payloads that
+    // fail strict whole-frame parsing. The Message Type attribute is still
+    // plaintext in the first fragment and is enough for passive detection.
+    if (messageTypeValue == 0 && available >= 18) {
+        const uint8_t* eap = eapol + 4;
+        const bool expandedWsc =
+            eap[4] == 0xfe &&
+            eap[5] == 0x00 && eap[6] == 0x37 && eap[7] == 0x2a &&
+            wps::readBe32(eap + 8) == 0x00000001;
+        if (expandedWsc) {
+            const uint16_t eapLength = wps::readBe16(eap + 2);
+            const size_t availableEap = available - 4;
+            const size_t searchLength = eapLength >= 12
+                ? (eapLength < availableEap ? eapLength : availableEap)
+                : 0;
+            if (searchLength > 12) {
+                messageTypeValue = findWscMessageType(eap + 12, searchLength - 12);
+            }
+        }
+    }
+
+    const char* stageName = stageNameForMessage(messageTypeValue);
     if (stageName == nullptr) return;
 
     if (!matchesTarget(bssid)) return;
@@ -215,7 +255,7 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
         client,
         pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : channel_,
         pkt->rx_ctrl.rssi,
-        messageType->value[0],
+        messageTypeValue,
         stageName
     );
 }
