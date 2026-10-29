@@ -124,7 +124,28 @@ void WpsLockDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
 void WpsLockDetector::upsert(const ApRecord& record) {
     for (size_t index = 0; index < recordCount_; ++index) {
         if (memcmp(records_[index].bssid, record.bssid, 6) == 0) {
-            records_[index] = record;
+            ApRecord merged = record;
+            ApRecord& existing = records_[index];
+            // Some APs emit frames without an SSID element even when the SSID is
+            // visible in normal scans. Preserve the best SSID observed during
+            // this scan instead of overwriting a known SSID with an empty one.
+            if (merged.ssid[0] == '\0' && existing.ssid[0] != '\0') {
+                memcpy(merged.ssid, existing.ssid, sizeof(merged.ssid));
+            }
+            // WPS attributes can appear in only one of beacon/probe-response
+            // frames. Keep previously observed metadata when a later frame is
+            // less complete.
+            if (!merged.wpsParsed && existing.wpsParsed) {
+                merged.wpsParsed = true;
+                merged.wpsVersion = existing.wpsVersion;
+                merged.configMethods = existing.configMethods;
+                merged.selectedRegistrar = existing.selectedRegistrar;
+            }
+            if (!merged.lockReported && existing.lockReported) {
+                merged.lockReported = true;
+                merged.locked = existing.locked;
+            }
+            existing = merged;
             return;
         }
     }
