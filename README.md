@@ -85,14 +85,14 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
 | Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
-| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, plus capture-preserving `DEAUTH_BURST` retries |
+| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, plus capture-preserving `DEAUTH_BURST` retries. Android multi-target deauth currently uses repeated `DEAUTH_BURST` calls with app-side channel hopping; no `DEAUTH_MULTI` command exists yet. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
-| Captive Portal | All | SoftAP evil twin with async HTTP server, custom HTML upload |
+| Captive Portal | All | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. |
 | BLE HID | C3, C5, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
 | BLE Scanner | C3, C5, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
@@ -110,6 +110,20 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > The regulatory country is configured from Android Settings and enforced by
 > the firmware channel mask. C5 and S3 builds also advertise `wps_pixie`; C3
 > builds compile with the feature disabled.
+
+### Portal HTML memory limits
+
+The portal keeps the uploaded HTML page in RAM. `RESET_HTML` rejects pages over
+**24 KiB** and also rejects allocations that do not fit the current heap with
+the firmware's 40 KB safety margin. Android performs a matching preflight and
+stops the portal if `RESET_HTML`, a chunk upload, or final verification fails.
+
+### Multi-target deauth status
+
+Multi-target selection, per-target bursts, and channel hopping are currently
+orchestrated by the Android app using repeated `DEAUTH_BURST` commands. A future
+firmware command can consolidate this into a true multi-target deauth primitive,
+but no `DEAUTH_MULTI` protocol command is implemented yet.
 
 ### Experimental Mesh (ESP-NOW)
 
@@ -261,6 +275,7 @@ src/
   portal.cpp/h         # Captive portal (SoftAP + async HTTP server)
   deauth_detector.cpp/h # Passive deauth/disassoc detector
   hidden_ap.cpp/h      # Hidden AP detection and SSID resolution
+  wps_*.cpp/h          # Raw WPS/WSC parsing, registrar state machine, and Pixie Dust flow
   ble_hid.cpp/h        # BLE keyboard/mouse HID (C3, S3, DevKit)
   ble_scanner.cpp/h    # BLE advertisement scanner (C3, S3, DevKit)
   ble_profile.cpp/h    # Read-only BLE GATT profiler (C3, S3, DevKit)
