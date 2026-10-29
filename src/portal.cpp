@@ -337,6 +337,9 @@ void PortalManager::update() {
 }
 
 void PortalManager::stop() {
+    const bool hadRuntime =
+        _running || _server != nullptr || _dnsServer != nullptr ||
+        _deauthTaskHandle != nullptr;
     _running = false;
     _loginAttempts = 0;
     _hasTarget = false;
@@ -344,10 +347,14 @@ void PortalManager::stop() {
     if (_server) { _server->end(); delete _server; _server = nullptr; delay(100); }
     if (_dnsServer) { _dnsServer->stop(); delete _dnsServer; _dnsServer = nullptr; delay(100); }
 
-    // Fully tear down the SoftAP so the next portal start gets fresh DHCP,
-    // DNS, and HTTP state instead of reusing a half-stopped AP instance.
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_MODE_APSTA);
+    // Only tear down/re-enable the AP if a portal was actually running.
+    // stopAllModules() calls this before every radio module; unconditionally
+    // calling WiFi.mode(AP_STA) here recreates the Arduino default ESP_XXXXXX
+    // SoftAP and overwrites the hidden/protected helper AP configuration.
+    if (hadRuntime) {
+        WiFi.softAPdisconnect(true);
+        WiFi.mode(WIFI_MODE_APSTA);
+    }
 
     free(_htmlBuffer);
     _htmlBuffer  = nullptr;

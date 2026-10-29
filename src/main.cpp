@@ -12,6 +12,7 @@
 #include "ld2450.h"
 #include "ir_remote.h"
 #include "pn532_nfc.h"
+#include "wps_pixie.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -67,6 +68,7 @@ MeshManager    mesh;
 Ld2450         ld2450;
 IrRemote       irRemote;
 Pn532Nfc       pn532Nfc;
+WpsPixieManager wpsPixie;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -316,7 +318,13 @@ struct DeauthTxStats {
     uint32_t requested = 0;
     uint32_t sent = 0;
     uint32_t failed = 0;
+    uint32_t elapsedMs = 0;
 };
+
+static float framesPerSecond(uint32_t frames, uint32_t elapsedMs) {
+    if (elapsedMs == 0) return 0.0f;
+    return (static_cast<float>(frames) * 1000.0f) / static_cast<float>(elapsedMs);
+}
 
 static DeauthTxStats transmitDeauthFrames(
     const uint8_t bssid[6],
@@ -327,6 +335,7 @@ static DeauthTxStats transmitDeauthFrames(
 ) {
     DeauthTxStats stats;
     stats.requested = count;
+    const uint32_t startedMs = millis();
 
     uint8_t deauthFrame[26] = {
         0xC0, 0x00, 0x00, 0x00,
@@ -352,6 +361,7 @@ static DeauthTxStats transmitDeauthFrames(
         seq += 0x0010;
         if (intervalMs > 0 && i + 1 < count) delay(intervalMs);
     }
+    stats.elapsedMs = millis() - startedMs;
     return stats;
 }
 
@@ -375,7 +385,10 @@ static void sendDeauthLoopStatsEvent(const char* status, bool stopped) {
     ev["failed_frames"] = gDeauthLoopFailed;
     ev["duration_s"] = gDeauthLoopDurationSec;
     ev["interval_ms"] = gDeauthLoopIntervalMs;
-    ev["elapsed_ms"] = gDeauthLoopStartedMs == 0 ? 0 : (millis() - gDeauthLoopStartedMs);
+    const uint32_t elapsedMs =
+        gDeauthLoopStartedMs == 0 ? 0 : (millis() - gDeauthLoopStartedMs);
+    ev["elapsed_ms"] = elapsedMs;
+    ev["pps"] = framesPerSecond(gDeauthLoopSent, elapsedMs);
     ev["stopped"] = stopped;
     proto.sendEvent("deauth_stats", ev);
 }
@@ -467,6 +480,7 @@ static void stopRadioModules() {
     hiddenApDetector.stop();
     beacon.stop();
     portal.stop();
+    wpsPixie.stop();
     esp_wifi_set_promiscuous(false);
 }
 
@@ -748,6 +762,85 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendResp(id, true, "pong");
     }
 
+    // ── WPS PIXIE DUST ────────────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_PIXIE_ATTEMPT") == 0) {
+        if (!wpsPixieSupported()) {
+            proto.sendResp(id, false, "wps_pixie_not_supported");
+            return;
+        }
+        String bssid = doc["args"]["bssid"] | "";
+        String ssid = doc["args"]["ssid"] | "";
+        String pin = doc["args"]["pin"] | "";
+        String runId = doc["args"]["run_id"] | "";
+        const bool captureOnly = doc["args"]["capture_only"] | false;
+        const bool reuseMac = doc["args"]["reuse_mac"] | false;
+        int channel = doc["args"]["channel"] | 0;
+        bssid.trim();
+        bssid.toUpperCase();
+        ssid.trim();
+        pin.trim();
+        if (runId.isEmpty()) {
+            char idBuffer[24];
+            snprintf(idBuffer, sizeof(idBuffer), "wps%08x", (unsigned)esp_random());
+            runId = idBuffer;
+        }
+        if (bssid.isEmpty() || ssid.isEmpty() || pin.isEmpty() || channel < 1 || channel > 177) {
+            proto.sendResp(id, false, "invalid WPS target or PIN");
+            return;
+        }
+
+        stopAllModules();
+        String error;
+        if (!wpsPixie.startAttempt(
+                bssid, ssid, (uint8_t)channel, pin, runId, captureOnly, reuseMac, error)) {
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = error;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["run_id"] = runId;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "WPS_PIXIE_CONTINUE") == 0) {
+        String runId = doc["args"]["run_id"] | "";
+        String pin = doc["args"]["pin"] | "";
+        runId.trim();
+        pin.trim();
+        String error;
+        if (!wpsPixie.continueWithRecoveredPin(runId, pin, error)) {
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = error;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+        JsonDocument resp;
+        resp["ok"] = true;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "WPS_PIXIE_STOP") == 0) {
+        wpsPixie.stop();
+        JsonDocument resp;
+        resp["ok"] = true;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── REGULATORY COUNTRY ────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_COUNTRY") == 0) {
         String requested = doc["args"]["country"] | "";
@@ -816,6 +909,9 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("html_diag");
         features.add("stop_all");
         features.add("wps");
+        #if WPS_PIXIE_SUPPORTED
+            features.add("wps_pixie");
+        #endif
         features.add("hidden_ap");
         features.add("storage");
         features.add("ld2450");
@@ -1387,6 +1483,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["sent_frames"] = stats.sent;
         resp["failed_frames"] = stats.failed;
         resp["interval_ms"] = intervalMs;
+        resp["elapsed_ms"] = stats.elapsedMs;
+        resp["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1396,11 +1494,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     else if (strcmp(cmd, "DEAUTH_STOP") == 0) {
         const uint32_t sent = gDeauthLoopSent;
         const uint32_t failed = gDeauthLoopFailed;
+        const uint32_t elapsedMs = gDeauthLoopStartedMs == 0
+            ? 0 : (millis() - gDeauthLoopStartedMs);
         stopDeauthLoopAndWait();
         JsonDocument resp;
         resp["ok"] = true;
         resp["sent_frames"] = sent;
         resp["failed_frames"] = failed;
+        resp["elapsed_ms"] = elapsedMs;
+        resp["pps"] = framesPerSecond(sent, elapsedMs);
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1539,6 +1641,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         statsDoc["sent_frames"] = stats.sent;
         statsDoc["failed_frames"] = stats.failed;
         statsDoc["interval_ms"] = intervalMs;
+        statsDoc["elapsed_ms"] = stats.elapsedMs;
+        statsDoc["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         statsDoc["reason"] = reason;
         proto.sendEvent("deauth_stats", statsDoc);
 
@@ -1550,6 +1654,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["sent_frames"] = stats.sent;
         resp["failed_frames"] = stats.failed;
         resp["interval_ms"] = intervalMs;
+        resp["elapsed_ms"] = stats.elapsedMs;
+        resp["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -2695,14 +2801,21 @@ void setup() {
     WiFi.mode(WIFI_MODE_APSTA);
     applyStoredWifiCountry();
 
-    // Configure a minimal hidden AP so WIFI_IF_AP is always valid for TX.
-    wifi_config_t ap_cfg = {};
-    strcpy((char*)ap_cfg.ap.ssid, "nrcap32");
-    ap_cfg.ap.ssid_len       = 7;
-    ap_cfg.ap.ssid_hidden    = 1;
-    ap_cfg.ap.max_connection = 0;
-    ap_cfg.ap.channel        = 1;  // default, will be changed by deauth/portal
-    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    // Configure a hidden, protected AP so WIFI_IF_AP is always valid for TX
+    // without exposing the Arduino default open ESP_XXXXXX SoftAP.
+    {
+        char idleSsid[24]{};
+        char idlePass[9]{};
+        static const char kIdleChars[] =
+            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+        const uint32_t seed = esp_random();
+        snprintf(idleSsid, sizeof(idleSsid), "NRSuite-Idle-%06x", seed & 0xffffff);
+        for (size_t i = 0; i < 8; ++i) {
+            idlePass[i] = kIdleChars[(seed >> ((i % 4) * 8)) % (sizeof(kIdleChars) - 1)];
+        }
+        idlePass[8] = '\0';
+        WiFi.softAP(idleSsid, idlePass, 1, 1, 1);
+    }
 
     // Ensure promiscuous is OFF at boot
     esp_wifi_set_promiscuous(false);
@@ -2746,6 +2859,7 @@ void setup() {
     pinBruteforce.begin(proto);
     irRemote.begin(proto);
     pn532Nfc.begin(proto);
+    wpsPixie.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -2774,6 +2888,7 @@ void loop() {
     emitLd2450Events();
     irRemote.update();
     pn532Nfc.update();
+    wpsPixie.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();

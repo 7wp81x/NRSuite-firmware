@@ -85,8 +85,9 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
 | Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
-| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or stoppable duration-based loop mode, plus capture-preserving `DEAUTH_BURST` retries |
+| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, plus capture-preserving `DEAUTH_BURST` retries |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
+| WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
@@ -107,7 +108,8 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > ESP32-C5 builds advertise `wifi_5ghz` and default shared Wi-Fi scans to
 > `WIFI_BAND_MODE_AUTO`. The 2.4 GHz and 5 GHz C5 paths are hardware-validated.
 > The regulatory country is configured from Android Settings and enforced by
-> the firmware channel mask.
+> the firmware channel mask. C5 and S3 builds also advertise `wps_pixie`; C3
+> builds compile with the feature disabled.
 
 ### Experimental Mesh (ESP-NOW)
 
@@ -313,6 +315,7 @@ Features are conditionally compiled based on the target board. Key flags set in 
 | `HID_SUPPORTED` | S2, S3 | Enables USB HID BadUSB |
 | `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3 | Native USB CDC without external UART |
 | `CONFIG_ESP_WIFI_ENABLE_SNIFFER` | All | Enables promiscuous mode for packet capture |
+| `WPS_PIXIE_SUPPORTED` | S3, C5 | Enables the raw WPS Pixie Dust registrar flow and `wps_pixie` capability |
 
 ---
 
