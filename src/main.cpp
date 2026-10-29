@@ -879,25 +879,51 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             proto.sendResp(id, false, bandError.c_str());
             return;
         }
-        const char* mode = doc["args"]["mode"] | "hop";
-        const bool hopping = strcmp(mode, "fixed") != 0;
-        uint8_t channel = doc["args"]["channel"] | 1;
-        if (!isValidWifiChannel(channel)) {
-            proto.sendResp(id, false, "invalid channel");
-            return;
-        }
-        if (!hopping) {
+
+        uint8_t channels[64] = {};
+        size_t channelCount = 0;
+        JsonArray channelsArray = doc["args"]["channels"].as<JsonArray>();
+        for (JsonVariant value : channelsArray) {
+            const uint8_t channel = value.as<uint8_t>();
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid channel");
+                return;
+            }
             String regulatoryError;
             if (!validateRegulatoryChannel(channel, regulatoryError)) {
                 proto.sendResp(id, false, regulatoryError.c_str());
                 return;
             }
+            bool duplicate = false;
+            for (size_t existing = 0; existing < channelCount; ++existing) {
+                if (channels[existing] == channel) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate && channelCount < sizeof(channels)) {
+                channels[channelCount++] = channel;
+            }
         }
+
+        uint8_t targets[32][6] = {};
+        size_t targetCount = 0;
+        JsonArray targetsArray = doc["args"]["targets"].as<JsonArray>();
+        for (JsonVariant value : targetsArray) {
+            const char* bssidStr = value.as<const char*>();
+            if (bssidStr == nullptr || targetCount >= 32) continue;
+            if (parseMac(bssidStr, targets[targetCount])) {
+                targetCount++;
+            }
+        }
+
         uint16_t hopIntervalMs = doc["args"]["interval_ms"] | 300;
         radioIdle();
         const bool ok = wpsAttemptDetector.start(
-            hopping,
-            channel,
+            channelCount > 0 ? channels : nullptr,
+            channelCount,
+            targetCount > 0 ? &targets[0][0] : nullptr,
+            targetCount,
             hopIntervalMs,
             bandMode != WifiBandMode::BAND_2G
         );
@@ -905,9 +931,10 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["ok"] = ok;
         if (ok) {
             resp["active"] = true;
-            resp["mode"] = hopping ? "hop" : "fixed";
-            resp["channel"] = wpsAttemptDetector.channel();
             resp["hopping"] = wpsAttemptDetector.hopping();
+            resp["channel"] = wpsAttemptDetector.channel();
+            resp["channels"] = channelCount;
+            resp["targets"] = targetCount;
             resp["interval_ms"] = hopIntervalMs;
         } else {
             resp["error"] = "wps_attempt_detect_start_failed";

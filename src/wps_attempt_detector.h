@@ -7,7 +7,14 @@
 class WpsAttemptDetector {
 public:
     void begin(BridgeProtocol& proto);
-    bool start(bool hopping, uint8_t channel, uint16_t hopIntervalMs, bool include5ghz);
+    bool start(
+        const uint8_t* channels,
+        size_t channelCount,
+        const uint8_t* targetBssids,
+        size_t targetCount,
+        uint16_t hopIntervalMs,
+        bool include5ghz
+    );
     void stop();
     void update();
 
@@ -62,6 +69,10 @@ private:
     uint16_t hopIntervalMs_ = 300;
     uint32_t lastHopMs_ = 0;
     uint8_t hopIndex_ = 0;
+    uint8_t hopChannels_[64] = {};
+    size_t hopChannelCount_ = 0;
+    uint8_t targetBssids_[32][6] = {};
+    size_t targetCount_ = 0;
     uint16_t sessionCount_ = 0;
     uint32_t frameCount_ = 0;
     uint32_t nextSessionId_ = 1;
@@ -80,4 +91,5 @@ private:
     );
     void processEvent(const AttemptEvent& event);
     void hop();
+    bool matchesTarget(const uint8_t bssid[6]) const;
 };

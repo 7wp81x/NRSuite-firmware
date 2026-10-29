@@ -186,6 +186,7 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
         const uint8_t* eap = eapol + 4;
         const uint16_t eapLength = wps::readBe16(eap + 2);
         if (eapLength >= 5 && eapLength <= available - 4 && eap[4] == 0x01) {
+            if (!matchesTarget(bssid)) return;
             enqueueAttempt(
                 bssid,
                 client,
@@ -208,6 +209,7 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
     const char* stageName = stageNameForMessage(messageType->value[0]);
     if (stageName == nullptr) return;
 
+    if (!matchesTarget(bssid)) return;
     enqueueAttempt(
         bssid,
         client,
@@ -291,41 +293,72 @@ void WpsAttemptDetector::processEvent(const AttemptEvent& event) {
     proto_->sendEvent("wps_attempt_session", doc);
 }
 
+bool WpsAttemptDetector::matchesTarget(const uint8_t bssid[6]) const {
+    if (targetCount_ == 0) return true;
+    for (size_t index = 0; index < targetCount_; ++index) {
+        if (memcmp(targetBssids_[index], bssid, 6) == 0) return true;
+    }
+    return false;
+}
+
 void WpsAttemptDetector::hop() {
     if (!active_ || !hopping_) return;
     if (millis() - lastHopMs_ < hopIntervalMs_) return;
+    if (hopChannelCount_ == 0) return;
     lastHopMs_ = millis();
-    if (include5ghz_) {
-        const uint8_t count = sizeof(WIFI_5G_CHANNELS) / sizeof(WIFI_5G_CHANNELS[0]);
-        hopIndex_ = (hopIndex_ + 1) % (14 + count);
-        channel_ = hopIndex_ < 14 ? WIFI_2G_CHANNELS[hopIndex_] : WIFI_5G_CHANNELS[hopIndex_ - 14];
-    } else {
-        hopIndex_ = (hopIndex_ + 1) % 14;
-        channel_ = WIFI_2G_CHANNELS[hopIndex_];
-    }
+    hopIndex_ = (uint8_t)((hopIndex_ + 1) % hopChannelCount_);
+    channel_ = hopChannels_[hopIndex_];
     esp_wifi_set_channel(channel_, WIFI_SECOND_CHAN_NONE);
 }
 
 bool WpsAttemptDetector::start(
-    bool hopping,
-    uint8_t channel,
+    const uint8_t* channels,
+    size_t channelCount,
+    const uint8_t* targetBssids,
+    size_t targetCount,
     uint16_t hopIntervalMs,
     bool include5ghz
 ) {
-    if (hopping) {
-        if (channel == 0) channel = 1;
-    } else if (channel == 0) {
-        return false;
+    stop();
+    hopChannelCount_ = 0;
+    if (channelCount > 0) {
+        for (size_t index = 0; index < channelCount && hopChannelCount_ < 64; ++index) {
+            const uint8_t channel = channels[index];
+            bool duplicate = false;
+            for (size_t existing = 0; existing < hopChannelCount_; ++existing) {
+                if (hopChannels_[existing] == channel) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) hopChannels_[hopChannelCount_++] = channel;
+        }
+    }
+    if (hopChannelCount_ == 0) {
+        for (uint8_t channel : WIFI_2G_CHANNELS) {
+            hopChannels_[hopChannelCount_++] = channel;
+        }
+        if (include5ghz) {
+            for (uint8_t channel : WIFI_5G_CHANNELS) {
+                if (hopChannelCount_ < 64) hopChannels_[hopChannelCount_++] = channel;
+            }
+        }
+    }
+    if (hopChannelCount_ == 0) return false;
+
+    targetCount_ = 0;
+    if (targetBssids != nullptr && targetCount > 0) {
+        targetCount_ = targetCount > 32 ? 32 : targetCount;
+        memcpy(targetBssids_, targetBssids, targetCount_ * 6);
     }
 
-    stop();
     active_ = true;
-    hopping_ = hopping;
+    hopping_ = hopChannelCount_ > 1;
     include5ghz_ = include5ghz;
-    channel_ = channel;
+    channel_ = hopChannels_[0];
+    hopIndex_ = 0;
     hopIntervalMs_ = constrain(hopIntervalMs, 100, 2000);
     lastHopMs_ = millis();
-    hopIndex_ = 0;
     sessionCount_ = 0;
     frameCount_ = 0;
     nextSessionId_ = 1;
