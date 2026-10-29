@@ -14,6 +14,7 @@
 #include "pn532_nfc.h"
 #include "wps_pixie.h"
 #include "wps_lock_detector.h"
+#include "wps_attempt_detector.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -71,6 +72,7 @@ IrRemote       irRemote;
 Pn532Nfc       pn532Nfc;
 WpsPixieManager wpsPixie;
 WpsLockDetector wpsLockDetector;
+WpsAttemptDetector wpsAttemptDetector;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -483,6 +485,7 @@ static void stopRadioModules() {
     beacon.stop();
     portal.stop();
     wpsPixie.stop();
+    wpsAttemptDetector.stop();
     esp_wifi_set_promiscuous(false);
 }
 
@@ -867,6 +870,75 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+    // ── WPS ATTEMPT DETECTOR ──────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_START") == 0) {
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+        const char* mode = doc["args"]["mode"] | "hop";
+        const bool hopping = strcmp(mode, "fixed") != 0;
+        uint8_t channel = doc["args"]["channel"] | 1;
+        if (!isValidWifiChannel(channel)) {
+            proto.sendResp(id, false, "invalid channel");
+            return;
+        }
+        if (!hopping) {
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+        }
+        uint16_t hopIntervalMs = doc["args"]["interval_ms"] | 300;
+        radioIdle();
+        const bool ok = wpsAttemptDetector.start(
+            hopping,
+            channel,
+            hopIntervalMs,
+            bandMode != WifiBandMode::BAND_2G
+        );
+        JsonDocument resp;
+        resp["ok"] = ok;
+        if (ok) {
+            resp["active"] = true;
+            resp["mode"] = hopping ? "hop" : "fixed";
+            resp["channel"] = wpsAttemptDetector.channel();
+            resp["hopping"] = wpsAttemptDetector.hopping();
+            resp["interval_ms"] = hopIntervalMs;
+        } else {
+            resp["error"] = "wps_attempt_detect_start_failed";
+        }
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_STOP") == 0) {
+        wpsAttemptDetector.stop();
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["sessions"] = wpsAttemptDetector.sessionCount();
+        resp["frames"] = wpsAttemptDetector.frameCount();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_STATUS") == 0) {
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["active"] = wpsAttemptDetector.active();
+        resp["channel"] = wpsAttemptDetector.channel();
+        resp["hopping"] = wpsAttemptDetector.hopping();
+        resp["sessions"] = wpsAttemptDetector.sessionCount();
+        resp["frames"] = wpsAttemptDetector.frameCount();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── REGULATORY COUNTRY ────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_COUNTRY") == 0) {
         String requested = doc["args"]["country"] | "";
@@ -936,6 +1008,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("stop_all");
         features.add("wps");
         features.add("wps_lock_detect");
+        features.add("wps_attempt_detect");
         #if WPS_PIXIE_SUPPORTED
             features.add("wps_pixie");
         #endif
@@ -2888,6 +2961,7 @@ void setup() {
     pn532Nfc.begin(proto);
     wpsPixie.begin(proto);
     wpsLockDetector.begin(proto);
+    wpsAttemptDetector.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -2917,6 +2991,7 @@ void loop() {
     irRemote.update();
     pn532Nfc.update();
     wpsPixie.update();
+    wpsAttemptDetector.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();
