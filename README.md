@@ -88,6 +88,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, plus capture-preserving `DEAUTH_BURST` retries. Android multi-target deauth currently uses repeated `DEAUTH_BURST` calls with app-side channel hopping; no `DEAUTH_MULTI` command exists yet. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
+| WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |

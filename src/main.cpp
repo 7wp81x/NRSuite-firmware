@@ -13,6 +13,7 @@
 #include "ir_remote.h"
 #include "pn532_nfc.h"
 #include "wps_pixie.h"
+#include "wps_lock_detector.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -69,6 +70,7 @@ Ld2450         ld2450;
 IrRemote       irRemote;
 Pn532Nfc       pn532Nfc;
 WpsPixieManager wpsPixie;
+WpsLockDetector wpsLockDetector;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -841,6 +843,30 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+    // ── WPS LOCK DETECTOR ─────────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_LOCK_SCAN") == 0) {
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+        uint16_t dwellMs = doc["args"]["dwell_ms"] | 120;
+        dwellMs = (uint16_t)constrain(dwellMs, 60, 1000);
+        radioIdle();
+        const int count = wpsLockDetector.scan(
+            bandMode != WifiBandMode::BAND_2G,
+            dwellMs
+        );
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["count"] = count;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── REGULATORY COUNTRY ────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_COUNTRY") == 0) {
         String requested = doc["args"]["country"] | "";
@@ -909,6 +935,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("html_diag");
         features.add("stop_all");
         features.add("wps");
+        features.add("wps_lock_detect");
         #if WPS_PIXIE_SUPPORTED
             features.add("wps_pixie");
         #endif
@@ -2860,6 +2887,7 @@ void setup() {
     irRemote.begin(proto);
     pn532Nfc.begin(proto);
     wpsPixie.begin(proto);
+    wpsLockDetector.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);

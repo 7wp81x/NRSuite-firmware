@@ -9,6 +9,9 @@ namespace wps {
 constexpr uint16_t ATTR_AUTHENTICATOR = 0x1005;
 constexpr uint16_t ATTR_AUTH_TYPE = 0x1003;
 constexpr uint16_t ATTR_ENCRYPTED_SETTINGS = 0x1018;
+constexpr uint16_t ATTR_CONFIG_METHODS = 0x1008;
+constexpr uint16_t ATTR_SELECTED_REGISTRAR = 0x1041;
+constexpr uint16_t ATTR_AP_SETUP_LOCKED = 0x1057;
 constexpr uint16_t ATTR_ENROLLEE_NONCE = 0x101a;
 constexpr uint16_t ATTR_DEVICE_PASSWORD_ID = 0x1012;
 constexpr uint16_t ATTR_MESSAGE_TYPE = 0x1022;
