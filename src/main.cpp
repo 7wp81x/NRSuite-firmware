@@ -249,7 +249,12 @@ static void applyStoredWifiCountry() {
     }
 }
 
-static bool configureWifiBand(const char* band, WifiBandMode& mode, String& error) {
+static bool configureWifiBand(
+    const char* band,
+    WifiBandMode& mode,
+    String& error,
+    bool applyHardwareMode = true
+) {
     const bool fiveSupported = isWifi5GhzEnabled();
 
     if (strcmp(band, "auto") == 0) {
@@ -268,28 +273,83 @@ static bool configureWifiBand(const char* band, WifiBandMode& mode, String& erro
     }
 
     #if defined(CONFIG_IDF_TARGET_ESP32C5)
-        if (mode == WifiBandMode::AUTO) {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
-        } else if (mode == WifiBandMode::BAND_5G) {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY);
-        } else {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+        if (applyHardwareMode) {
+            esp_err_t err;
+            if (mode == WifiBandMode::AUTO) {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+            } else if (mode == WifiBandMode::BAND_5G) {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY);
+            } else {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+            }
+            if (err != ESP_OK) {
+                error = "band mode setup failed: ";
+                error += esp_err_to_name(err);
+                return false;
+            }
+            delay(80);
         }
     #endif
     return true;
 }
 
-static int idf_scan_networks(BridgeProtocol& proto) {
+static int idf_scan_networks(BridgeProtocol& proto, WifiBandMode bandMode) {
     (void)proto;
+
+    #if defined(CONFIG_IDF_TARGET_ESP32C5)
+        // Keep the radio in AUTO band mode so the idle 2.4 GHz helper SoftAP
+        // does not prevent the STA interface from scanning 5 GHz. The channel
+        // bitmap below restricts the scan to the requested band.
+        const esp_err_t bandErr = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        if (bandErr != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: failed to enable dual-band mode: %s (%d)\n",
+                esp_err_to_name(bandErr),
+                (int)bandErr
+            );
+            return -1;
+        }
+        delay(80);
+    #endif
+
+    uint16_t bitmap2g = 0;
+    uint32_t bitmap5g = 0;
+    if (bandMode != WifiBandMode::BAND_5G) {
+        for (uint8_t channel = 1; channel <= 14; ++channel) {
+            if (isChannelAllowedByCountry(channel)) {
+                bitmap2g |= (uint16_t)(1u << channel);
+            }
+        }
+    }
+    if (isWifi5GhzEnabled() && bandMode != WifiBandMode::BAND_2G) {
+        for (uint8_t channel : WIFI_5G_CHANNELS) {
+            if (!isChannelAllowedByCountry(channel)) continue;
+            const int bit = wifi5gChannelBit(channel);
+            if (bit > 0) bitmap5g |= (1u << bit);
+        }
+    }
 
     wifi_scan_config_t cfg = {};
     cfg.ssid        = nullptr;
     cfg.bssid       = nullptr;
     cfg.channel     = 0;
     cfg.show_hidden = true;
-    cfg.scan_type   = WIFI_SCAN_TYPE_ACTIVE;
+    cfg.scan_type   = bandMode == WifiBandMode::BAND_5G
+        ? WIFI_SCAN_TYPE_PASSIVE
+        : WIFI_SCAN_TYPE_ACTIVE;
     cfg.scan_time.active.min = 100;
     cfg.scan_time.active.max = 300;
+    cfg.scan_time.passive = 200;
+    cfg.channel_bitmap.ghz_2_channels = bitmap2g;
+    cfg.channel_bitmap.ghz_5_channels = bitmap5g;
+
+    Serial.printf(
+        "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s\n",
+        wifiBandModeName(bandMode),
+        bitmap2g,
+        bitmap5g,
+        cfg.scan_type == WIFI_SCAN_TYPE_PASSIVE ? "passive" : "active"
+    );
 
     // Use ESP-IDF's blocking scan. The Arduino SCAN_DONE event path has
     // proven unreliable on C5, leaving the command waiting until timeout.
@@ -1466,21 +1526,21 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── SCAN_WIFI ─────────────────────────────────────────────────────────
     else if (strcmp(cmd, "SCAN_WIFI") == 0) {
-        const char* band = doc["args"]["band"] | "auto";
-        WifiBandMode bandMode = WifiBandMode::BAND_2G;
-        String bandError;
-        if (!configureWifiBand(band, bandMode, bandError)) {
-            proto.sendResp(id, false, bandError.c_str());
-            return;
-        }
-
         bool wasSniffing = sniffer.active();
         uint8_t prevChannel = sniffer.channel();
         bool wasHopping = sniffer.hopping();
 
         radioIdle();
 
-        int n = idf_scan_networks(proto);
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError, false)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
+        int n = idf_scan_networks(proto, bandMode);
         if (n < 0) {
             proto.sendResp(id, false, "scan failed");
             return;

@@ -81,7 +81,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 | Module | Supported Boards | Description |
 |---|---|---|
-| Wi-Fi Scan | All (C5: 2.4/5 GHz) | Active AP scan with SSID, BSSID, channel, RSSI, security type; AUTO band mode on C5 |
+| Wi-Fi Scan | All (C5: 2.4/5 GHz) | AP scan with SSID, BSSID, channel, RSSI, and security type; C5 scans use dual-band AUTO mode plus explicit 2.4/5 GHz channel bitmaps, with passive timing for 5 GHz scans. |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
 | Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
