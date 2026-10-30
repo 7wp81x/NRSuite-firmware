@@ -1546,6 +1546,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             return;
         }
 
+        int emittedCount = 0;
         if (n > 0) {
             uint16_t count = (uint16_t)n;
             wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
@@ -1553,6 +1554,17 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
             if (records && esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
                 for (int i = 0; i < count; i++) {
+                    // The C5 scan bitmap can still return both bands in some
+                    // IDF/board states. Enforce the requested band here so the
+                    // app never receives cross-band results for an explicit
+                    // 2.4/5 GHz scan.
+                    if (bandMode == WifiBandMode::BAND_2G && records[i].primary >= 36) {
+                        continue;
+                    }
+                    if (bandMode == WifiBandMode::BAND_5G && records[i].primary < 36) {
+                        continue;
+                    }
+
                     char bssid_str[18];
                     snprintf(bssid_str, sizeof(bssid_str),
                              "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1569,6 +1581,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                     ev["wps"]      = (bool)records[i].wps;
                     ev["band"]     = wifiBandForChannel(records[i].primary);
                     proto.sendEvent("scan_ap", ev);
+                    emittedCount++;
                 }
             }
             free(records);
@@ -1578,7 +1591,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = n;
+        resp["count"] = emittedCount;
+        resp["scanned"] = n;
         resp["band"] = wifiBandModeName(bandMode);
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
