@@ -380,6 +380,19 @@ void WpsAttemptDetector::processEvent(const AttemptEvent& event) {
     session->lastStage = event.stage;
     strncpy(session->lastStageName, event.stageName, sizeof(session->lastStageName) - 1);
     session->lastStageName[sizeof(session->lastStageName) - 1] = '\0';
+    switch (event.stage) {
+        case wps::MSG_M1: session->m1Seen = true; break;
+        case wps::MSG_M2: session->m2Seen = true; break;
+        case wps::MSG_M3: session->m3Seen = true; break;
+        case wps::MSG_M4: session->m4Seen = true; break;
+        case wps::MSG_M5: session->m5Seen = true; break;
+        case wps::MSG_M6: session->m6Seen = true; break;
+        case wps::MSG_M7: session->m7Seen = true; break;
+        case wps::MSG_M8: session->m8Seen = true; break;
+        case wps::MSG_M2D: session->m2dSeen = true; break;
+        case wps::MSG_WSC_NACK: session->nackSeen = true; break;
+        default: break;
+    }
     session->lastSeenMs = event.seenMs;
     session->frames++;
     frameCount_++;
@@ -399,6 +412,20 @@ void WpsAttemptDetector::processEvent(const AttemptEvent& event) {
     doc["rssi"] = session->rssi;
     doc["stage"] = session->lastStageName;
     doc["message_type"] = session->lastStage;
+    doc["m1_seen"] = session->m1Seen;
+    doc["m2_seen"] = session->m2Seen;
+    doc["m3_seen"] = session->m3Seen;
+    doc["m4_seen"] = session->m4Seen;
+    doc["m5_seen"] = session->m5Seen;
+    doc["m6_seen"] = session->m6Seen;
+    doc["m7_seen"] = session->m7Seen;
+    doc["m8_seen"] = session->m8Seen;
+    doc["m2d_seen"] = session->m2dSeen;
+    doc["nack_seen"] = session->nackSeen;
+    doc["crackable_material"] =
+        session->m1Seen && session->m2Seen && session->m3Seen;
+    doc["credentials_likely_transferred"] =
+        session->m7Seen && session->m8Seen;
     doc["frames"] = session->frames;
     doc["first_seen_ms"] = session->firstSeenMs;
     doc["last_seen_ms"] = session->lastSeenMs;

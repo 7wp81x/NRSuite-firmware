@@ -35,6 +35,16 @@ private:
         int8_t rssi = -127;
         uint8_t lastStage = 0;
         char lastStageName[12] = {};
+        bool m1Seen = false;
+        bool m2Seen = false;
+        bool m3Seen = false;
+        bool m4Seen = false;
+        bool m5Seen = false;
+        bool m6Seen = false;
+        bool m7Seen = false;
+        bool m8Seen = false;
+        bool m2dSeen = false;
+        bool nackSeen = false;
         uint32_t firstSeenMs = 0;
         uint32_t lastSeenMs = 0;
         uint16_t frames = 0;
