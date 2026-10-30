@@ -85,11 +85,11 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
 | Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
-| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, plus capture-preserving `DEAUTH_BURST` retries. Android multi-target deauth currently uses repeated `DEAUTH_BURST` calls with app-side channel hopping; no `DEAUTH_MULTI` command exists yet. |
+| Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, capture-preserving `DEAUTH_BURST` retries, and firmware-native `DEAUTH_MULTI` with per-target channel scheduling and aggregate/per-target counters. Advertises `deauth_multi`. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
 | WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
-| WPS Attempt Detector | All | Passive EAP-WSC monitor that tracks WPS Identity/M1–M8 sessions by BSSID and source client MAC, including channel, RSSI, stage, frame count, and duration. It also emits live WPS lock-state changes for the target BSSID. Android selects target BSSIDs and the firmware hops only their channels; all-channel monitoring remains an advanced option. Advertises `wps_attempt_detect`. |
+| WPS Attempt Detector | All | Passive EAP-WSC monitor that tracks WPS Identity/M1–M8 sessions by BSSID and source client MAC, including channel, RSSI, stage, per-session evidence flags, frame count, and duration. It also emits live WPS lock-state changes for the target BSSID. Android uses M1–M3 material and M7–M8 transfer evidence for risk scoring. Advertises `wps_attempt_detect`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
@@ -122,10 +122,12 @@ stops the portal if `RESET_HTML`, a chunk upload, or final verification fails.
 
 ### Multi-target deauth status
 
-Multi-target selection, per-target bursts, and channel hopping are currently
-orchestrated by the Android app using repeated `DEAUTH_BURST` commands. A future
-firmware command can consolidate this into a true multi-target deauth primitive,
-but no `DEAUTH_MULTI` protocol command is implemented yet.
+Firmware-native multi-target deauth is implemented as `DEAUTH_MULTI`.
+Firmware owns the per-target channel schedule and reports aggregate plus
+per-target counters. `DEAUTH_STOP` stops either single- or multi-target loops,
+and `STOP_ALL` cleans up both. Android uses the native command when
+`STATUS.features` advertises `deauth_multi`; older firmware and selections over
+32 targets use the app-side repeated `DEAUTH_BURST` fallback.
 
 ### Experimental Mesh (ESP-NOW)
 
