@@ -64,6 +64,9 @@ void WpsAttemptDetector::begin(BridgeProtocol& proto) {
     if (eventQueue_ == nullptr) {
         eventQueue_ = xQueueCreate(48, sizeof(AttemptEvent));
     }
+    if (lockEventQueue_ == nullptr) {
+        lockEventQueue_ = xQueueCreate(32, sizeof(LockEvent));
+    }
 }
 
 void WpsAttemptDetector::promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
@@ -72,24 +75,66 @@ void WpsAttemptDetector::promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t ty
     instance_->handlePacket(static_cast<const wifi_promiscuous_pkt_t*>(buf));
 }
 
-void WpsAttemptDetector::rememberApName(const uint8_t bssid[6], const char* ssid) {
-    if (ssid == nullptr || ssid[0] == '\0') return;
+void WpsAttemptDetector::rememberApName(
+    const uint8_t bssid[6],
+    const char* ssid,
+    uint8_t channel,
+    int8_t rssi,
+    bool hasWpsIe,
+    bool wpsParsed,
+    bool lockReported,
+    bool locked
+) {
+    ApName* target = nullptr;
     for (auto& entry : apNames_) {
         if (entry.used && memcmp(entry.bssid, bssid, 6) == 0) {
-            strncpy(entry.ssid, ssid, sizeof(entry.ssid) - 1);
-            entry.ssid[sizeof(entry.ssid) - 1] = '\0';
-            return;
+            target = &entry;
+            break;
         }
     }
-    for (auto& entry : apNames_) {
-        if (!entry.used) {
-            entry.used = true;
-            memcpy(entry.bssid, bssid, 6);
-            strncpy(entry.ssid, ssid, sizeof(entry.ssid) - 1);
-            entry.ssid[sizeof(entry.ssid) - 1] = '\0';
-            return;
+    if (target == nullptr) {
+        for (auto& entry : apNames_) {
+            if (!entry.used) {
+                target = &entry;
+                target->used = true;
+                memcpy(target->bssid, bssid, 6);
+                break;
+            }
         }
     }
+    if (target == nullptr) return;
+
+    if (ssid != nullptr && ssid[0] != '\0') {
+        strncpy(target->ssid, ssid, sizeof(target->ssid) - 1);
+        target->ssid[sizeof(target->ssid) - 1] = '\0';
+    }
+    if (!hasWpsIe) return;
+
+    const uint8_t lockCode = lockReported
+        ? (locked ? 1 : 2)
+        : (wpsParsed ? 2 : 3);
+    const bool changed = !target->wpsLockInitialized || target->wpsLockCode != lockCode;
+    target->wpsLockInitialized = true;
+    target->wpsLockCode = lockCode;
+    if (!changed) return;
+
+    LockEvent event;
+    memcpy(event.bssid, bssid, 6);
+    strncpy(event.ssid, target->ssid, sizeof(event.ssid) - 1);
+    event.ssid[sizeof(event.ssid) - 1] = '\0';
+    event.channel = channel;
+    event.rssi = rssi;
+    event.wpsParsed = wpsParsed;
+    event.lockReported = lockReported;
+    event.locked = lockReported && locked;
+    event.seenMs = millis();
+    if (lockEventQueue_ != nullptr) {
+        xQueueSend(lockEventQueue_, &event, 0);
+    }
+}
+
+void WpsAttemptDetector::enqueueLockEvent(const ApName& apName) {
+    (void)apName;
 }
 
 void WpsAttemptDetector::enqueueAttempt(
@@ -134,6 +179,11 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
     // Learn SSIDs from beacons/probe responses so attempt events can identify
     // the target AP without needing a separate active scan.
     if (type == 0 && (subtype == 8 || subtype == 5) && length >= 38) {
+        char ssid[33] = {};
+        bool hasWpsIe = false;
+        bool wpsParsed = false;
+        bool lockReported = false;
+        bool locked = false;
         size_t offset = 36;
         while (offset + 2 <= length) {
             const uint8_t elementId = frame[offset];
@@ -141,17 +191,40 @@ void WpsAttemptDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
             offset += 2;
             if (elementLength > length - offset) break;
             if (elementId == 0) {
-                char ssid[33] = {};
                 const size_t copyLength = elementLength > 32 ? 32 : elementLength;
                 if (copyLength > 0) {
                     memcpy(ssid, frame + offset, copyLength);
                 }
                 ssid[copyLength] = '\0';
-                rememberApName(frame + 16, ssid);
-                break;
+            } else if (elementId == 221 && elementLength >= 4) {
+                const uint8_t* value = frame + offset;
+                const bool wfaOui = value[0] == 0x00 && value[1] == 0x50 && value[2] == 0xf2;
+                if (wfaOui && value[3] == 0x04) {
+                    hasWpsIe = true;
+                    wps::WpsAttributes attributes;
+                    if (attributes.parse(value + 4, elementLength - 4)) {
+                        wpsParsed = true;
+                        const wps::WpsAttribute* lock =
+                            attributes.find(wps::ATTR_AP_SETUP_LOCKED);
+                        if (lock != nullptr && lock->length >= 1) {
+                            lockReported = true;
+                            locked = lock->value[0] != 0;
+                        }
+                    }
+                }
             }
             offset += elementLength;
         }
+        rememberApName(
+            frame + 16,
+            ssid,
+            pkt->rx_ctrl.channel != 0 ? pkt->rx_ctrl.channel : channel_,
+            pkt->rx_ctrl.rssi,
+            hasWpsIe,
+            wpsParsed,
+            lockReported,
+            locked
+        );
         return;
     }
 
@@ -405,6 +478,7 @@ bool WpsAttemptDetector::start(
     memset(sessions_, 0, sizeof(sessions_));
     memset(apNames_, 0, sizeof(apNames_));
     if (eventQueue_ != nullptr) xQueueReset(eventQueue_);
+    if (lockEventQueue_ != nullptr) xQueueReset(lockEventQueue_);
 
     wifi_promiscuous_filter_t filter = {};
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
@@ -429,5 +503,21 @@ void WpsAttemptDetector::update() {
     AttemptEvent event;
     while (xQueueReceive(eventQueue_, &event, 0) == pdTRUE) {
         processEvent(event);
+    }
+    if (lockEventQueue_ == nullptr || proto_ == nullptr) return;
+    LockEvent lockEvent;
+    while (xQueueReceive(lockEventQueue_, &lockEvent, 0) == pdTRUE) {
+        char bssid[18];
+        formatMac(bssid, lockEvent.bssid);
+        JsonDocument doc;
+        doc["bssid"] = bssid;
+        doc["ssid"] = lockEvent.ssid;
+        doc["channel"] = lockEvent.channel;
+        doc["rssi"] = lockEvent.rssi;
+        doc["wps_parsed"] = lockEvent.wpsParsed;
+        doc["lock_reported"] = lockEvent.lockReported;
+        doc["ap_setup_locked"] = lockEvent.locked;
+        doc["observed_at_ms"] = lockEvent.seenMs;
+        proto_->sendEvent("wps_ap_lock_state", doc);
     }
 }

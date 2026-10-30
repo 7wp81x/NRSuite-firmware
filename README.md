@@ -89,7 +89,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
 | WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
-| WPS Attempt Detector | All | Passive EAP-WSC monitor that tracks WPS Identity/M1–M8 sessions by BSSID and source client MAC, including channel, RSSI, stage, frame count, and duration. Android selects target BSSIDs and the firmware hops only their channels; all-channel monitoring remains an advanced option. Advertises `wps_attempt_detect`. |
+| WPS Attempt Detector | All | Passive EAP-WSC monitor that tracks WPS Identity/M1–M8 sessions by BSSID and source client MAC, including channel, RSSI, stage, frame count, and duration. It also emits live WPS lock-state changes for the target BSSID. Android selects target BSSIDs and the firmware hops only their channels; all-channel monitoring remains an advanced option. Advertises `wps_attempt_detect`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |

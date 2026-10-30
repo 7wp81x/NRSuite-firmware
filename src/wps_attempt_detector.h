@@ -44,6 +44,19 @@ private:
         bool used = false;
         uint8_t bssid[6] = {};
         char ssid[33] = {};
+        bool wpsLockInitialized = false;
+        uint8_t wpsLockCode = 0; // 1=locked, 2=likely unlocked, 3=unknown
+    };
+
+    struct LockEvent {
+        uint8_t bssid[6] = {};
+        char ssid[33] = {};
+        uint8_t channel = 0;
+        int8_t rssi = -127;
+        bool wpsParsed = false;
+        bool lockReported = false;
+        bool locked = false;
+        uint32_t seenMs = 0;
     };
 
     struct AttemptEvent {
@@ -62,6 +75,7 @@ private:
 
     BridgeProtocol* proto_ = nullptr;
     QueueHandle_t eventQueue_ = nullptr;
+    QueueHandle_t lockEventQueue_ = nullptr;
     bool active_ = false;
     bool hopping_ = false;
     bool include5ghz_ = false;
@@ -80,7 +94,17 @@ private:
     ApName apNames_[64] = {};
 
     void handlePacket(const wifi_promiscuous_pkt_t* pkt);
-    void rememberApName(const uint8_t bssid[6], const char* ssid);
+    void rememberApName(
+        const uint8_t bssid[6],
+        const char* ssid,
+        uint8_t channel,
+        int8_t rssi,
+        bool hasWpsIe,
+        bool wpsParsed,
+        bool lockReported,
+        bool locked
+    );
+    void enqueueLockEvent(const ApName& apName);
     void enqueueAttempt(
         const uint8_t bssid[6],
         const uint8_t client[6],
