@@ -5,6 +5,9 @@ This document lists all current and planned features across the NRSuite ecosyste
 - ✅ Implemented
 - 🚧 In progress
 - 📋 Planned
+- 🧪 Experimental / not release-ready
+- ⏸️ Parked / disabled pending hardware validation
+- ❌ Out of scope
 
 ---
 
@@ -19,8 +22,12 @@ This document lists all current and planned features across the NRSuite ecosyste
 | Evil Twin | ✅ | Rogue AP with captive portal |
 | Captive Portal | ✅ | Credential harvesting UI |
 | Packet Sniffer | ✅ | Monitor-mode capture, pcap export; AUTO/2.4/5 GHz hop selection on C5, target-channel-aware fixed capture, and capture-preserving deauth retries |
-| WPA Handshake Capture/Crack | ✅ | Offline dictionary cracking |
+| WPA Handshake Capture/Crack | ✅ | Offline WPA2 M1/M2 dictionary cracking support and capture-assist flows; app-side PCAP → `.22000` conversion is planned |
 | Nrugochi channel capture support | ✅ | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` supports multi-AP deauth plus all-EAPOL/all-beacon capture and reports requested/sent/failed frame counts |
+| WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
+| WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
+| WPS Attempt Detector | All | Passive EAP-WSC monitor tracks Identity/M1-M8/M2D/NACK sessions by BSSID and source client MAC, preserves per-session evidence flags, and emits live WPS lock-state changes. Advertises `wps_attempt_detect`. |
+| Half Handshake capture | 🧪 Experimental | Active probe-response/SoftAP experiment intended to elicit WPA2 M1+M2 from an authorized auto-connecting client. Not implemented; requires explicit authorization, WPA2/RSN compatibility, temporary-AP cleanup, and hardware validation. |
 | BLE HID | ✅ | Bluetooth LE keyboard/mouse HID and DuckyScript payloads |
 | BLE Scanner | ✅ | Advertisement scan with names, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | ✅ | Read-only service/characteristic enumeration over a BLE connection |
@@ -94,9 +101,9 @@ This document lists all current and planned features across the NRSuite ecosyste
 
 | Feature | Status | Notes |
 |---|---|---|
-| **IR** — Capture/Replay | 📋 | IR LED + receiver, cheap GPIO add-on |
-| **IR** — Universal Remote DB | 📋 | Common protocol library (NEC, SIRC, RC5) |
-| **IR** — TV-off Brute-force | 📋 | TV-B-Gone style |
+| **IR** — Capture/Replay | ✅ | RMT raw IR TX/RX with dynamic GPIO configuration, NVS persistence, `.ir` import/library, received-capture workflow, and Phone/ESP32 backends. Broader protocol/board validation remains pending. |
+| **IR** — Universal Remote DB | ✅ | Flipper-IRDB download/update/ZIP import and local remote library |
+| **IR** — TV-off Brute-force | ❌ | Out of scope; IR Finder covers the supported workflow |
 | **Sub-GHz (CC1101)** — Scanner | 📋 | 315/433/868/915MHz sweep |
 | **Sub-GHz** — Capture/Replay | 📋 | Fixed-code devices; rolling-code explicitly not supported/replayable |
 | **Sub-GHz** — Protocol Decoder | 📋 | Identifies fixed vs. rolling code |
@@ -104,6 +111,7 @@ This document lists all current and planned features across the NRSuite ecosyste
 | **nRF24** — MouseJack-style Analysis | 📋 | Detection/analysis of known-vulnerable wireless HID dongles |
 | **nRF24** — Packet Sniffer | 📋 | Promiscuous capture for research |
 | **LD2450** — mmWave Radar | 🟡 | UART 256000 target parser, corrected sign-magnitude decode, `LD2450_START/STOP/STATUS`, targets/presence/error events; Android plot and target list implemented |
+| **RFID/NFC** — PN532 I2C read | ⏸️ | Firmware/Android scaffolding exists but capability is disabled until reliable hardware validation |
 | **RFID/NFC** — Read (125kHz + 13.56MHz) | 📋 | RC522 + LF reader modules |
 | **RFID/NFC** — Emulate | 📋 | Replay previously-read tag |
 | **RFID/NFC** — Write/Clone | 📋 | To blank/magic tags |
@@ -131,7 +139,7 @@ Builds on existing offense infrastructure (sniff/pcap/frame codec).
 - ESP32-CAM node integration
 
 ### v3 — Peripheral & Long-range Expansion
-- Sub-GHz, nRF24, RFID/NFC, IR modules
+- Sub-GHz, nRF24, and RFID/NFC expansion modules
 - LoRa long-range relay node
 - Multi-hop mesh routing
 
