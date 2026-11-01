@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3-yellow.svg)](../../releases)
+[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1-yellow.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current release line:** `1.0.0-beta.3`. Mesh support from merged mesh branches is present but experimental.
+**Current release line:** `1.0.0-beta.3.1`. Mesh support from merged mesh branches is present but experimental.
 
 ---
 
@@ -113,12 +113,22 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > the firmware channel mask. C5 and S3 builds also advertise `wps_pixie`; C3
 > builds compile with the feature disabled.
 
-### Portal HTML memory limits
+### Portal HTML storage
 
-The portal keeps the uploaded HTML page in RAM. `RESET_HTML` rejects pages over
-**24 KiB** and also rejects allocations that do not fit the current heap with
-the firmware's 40 KB safety margin. Android performs a matching preflight and
-stops the portal if `RESET_HTML`, a chunk upload, or final verification fails.
+Portal HTML is file-backed. Android renders `#SSID#` into an app-cache temp file
+and uploads it in Base64 chunks; firmware writes `/portal/index.html` to the
+active portal filesystem and serves the completed file through the HTTP server.
+
+Storage mapping:
+
+- S2/S3: existing FAT `msc_ffat` partition, keeping USB MSC host-readable.
+- C3/C5/classic ESP32: dedicated LittleFS `portal` partition.
+
+`RESET_HTML` rejects pages over **24 KiB**. Portal start/upload failure stops the
+portal and reports the error to Android. Reflashing the non-MSC firmware images
+changes the partition table: the old 960 KiB SPIFFS area becomes a 704 KiB
+SPIFFS area plus a 256 KiB LittleFS `portal` area, so back up important
+wordlists/custom storage before flashing.
 
 ### Multi-target deauth status
 
@@ -364,7 +374,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.3 | v1.0.0-beta.3 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0-beta.3.1 | v1.0.0-beta.3.1 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
 

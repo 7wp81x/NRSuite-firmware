@@ -19,7 +19,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.3"
+#define FW_VERSION "1.0.0-beta.3.1"
 
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0
@@ -207,7 +207,7 @@ static String regulatoryChannelError(uint8_t channel) {
     String error = "channel ";
     error += channel;
     error += " is not allowed by regulatory country ";
-    error += (cc[0] ? cc : "01");
+    error += (cc[0] ? cc : "CH");
     return error;
 }
 
@@ -234,19 +234,19 @@ static void appendAllowedWifiChannels(JsonDocument& doc) {
 
 static void applyStoredWifiCountry() {
     Preferences prefs;
-    String country = "01";
+    String country = "CH";
     if (prefs.begin("nrsuite", true)) {
-        country = prefs.getString("wifi_country", "01");
+        country = prefs.getString("wifi_country", "CH");
         prefs.end();
     }
     country.trim();
     country.toUpperCase();
-    if (country.length() != 2) country = "01";
+    if (country.length() != 2) country = "CH";
     const esp_err_t err = esp_wifi_set_country_code(country.c_str(), false);
     if (err != ESP_OK) {
         Serial.printf("WiFi country %s rejected: %s (%d)\n",
                       country.c_str(), esp_err_to_name(err), (int)err);
-        esp_wifi_set_country_code("01", false);
+        esp_wifi_set_country_code("CH", false);
     }
 }
 
@@ -294,8 +294,57 @@ static bool configureWifiBand(
     return true;
 }
 
-static int idf_scan_networks(BridgeProtocol& proto, WifiBandMode bandMode) {
+static bool g_wifiScanInProgress = false;
+static uint32_t g_lastWifiScanEndMs = 0;
+static uint16_t g_lastWifiScanGoodCount = 0;
+static uint32_t g_lastWifiScanGoodMs = 0;
+static constexpr uint32_t WIFI_SCAN_DEFAULT_SETTLE_MS = 900;
+static constexpr uint32_t WIFI_SCAN_MIN_SETTLE_MS = 250;
+static constexpr uint32_t WIFI_SCAN_MAX_SETTLE_MS = 5000;
+static constexpr uint16_t WIFI_SCAN_MIN_DWELL_MS = 200;
+static constexpr uint16_t WIFI_SCAN_MAX_DWELL_MS = 1000;
+static constexpr uint32_t WIFI_SCAN_LOW_RESULT_WINDOW_MS = 60000;
+static constexpr uint8_t WIFI_SCAN_MAX_ATTEMPTS = 3;
+
+#if defined(CONFIG_IDF_TARGET_ESP32)
+// Classic ESP32 scans are noticeably less reliable with short active dwell
+// times. Give each channel a full 500 ms by default.
+static constexpr uint16_t WIFI_SCAN_DEFAULT_DWELL_MS = 500;
+#else
+static constexpr uint16_t WIFI_SCAN_DEFAULT_DWELL_MS = 300;
+#endif
+
+static bool scanResultLooksLow(uint16_t count) {
+    if (count == 0) return true;
+    if (g_lastWifiScanGoodCount < 3) return false;
+    if (millis() - g_lastWifiScanGoodMs > WIFI_SCAN_LOW_RESULT_WINDOW_MS) return false;
+    uint16_t lowThreshold = g_lastWifiScanGoodCount / 2;
+    if (lowThreshold < 2) lowThreshold = 2;
+    return count < lowThreshold;
+}
+
+static void finishWifiScan(bool stopScan) {
+    if (stopScan) esp_wifi_scan_stop();
+    g_wifiScanInProgress = false;
+    g_lastWifiScanEndMs = millis();
+}
+
+// Returns the number of APs found, or -1 on failure. The caller must call
+// finishWifiScan() after reading records on success. A concurrent scan request
+// returns -2 without disturbing the active one.
+static int idf_scan_networks(
+    BridgeProtocol& proto,
+    WifiBandMode bandMode,
+    uint32_t settleMs,
+    uint16_t dwellMs
+) {
     (void)proto;
+
+    if (g_wifiScanInProgress) {
+        Serial.println("SCAN_WIFI: rejected because another scan is already in progress");
+        return -2;
+    }
+    g_wifiScanInProgress = true;
 
     #if defined(CONFIG_IDF_TARGET_ESP32C5)
         // Keep the radio in AUTO band mode so the idle 2.4 GHz helper SoftAP
@@ -308,10 +357,20 @@ static int idf_scan_networks(BridgeProtocol& proto, WifiBandMode bandMode) {
                 esp_err_to_name(bandErr),
                 (int)bandErr
             );
+            finishWifiScan(false);
             return -1;
         }
         delay(80);
     #endif
+
+    settleMs = constrain(settleMs, WIFI_SCAN_MIN_SETTLE_MS, WIFI_SCAN_MAX_SETTLE_MS);
+    const uint32_t sinceLastScanMs = millis() - g_lastWifiScanEndMs;
+    if (sinceLastScanMs < settleMs) {
+        const uint32_t waitMs = settleMs - sinceLastScanMs;
+        Serial.printf("SCAN_WIFI: settling for %lu ms before scan\n",
+                      (unsigned long)waitMs);
+        delay(waitMs);
+    }
 
     uint16_t bitmap2g = 0;
     uint32_t bitmap5g = 0;
@@ -338,39 +397,100 @@ static int idf_scan_networks(BridgeProtocol& proto, WifiBandMode bandMode) {
     cfg.scan_type   = bandMode == WifiBandMode::BAND_5G
         ? WIFI_SCAN_TYPE_PASSIVE
         : WIFI_SCAN_TYPE_ACTIVE;
-    cfg.scan_time.active.min = 100;
-    cfg.scan_time.active.max = 300;
-    cfg.scan_time.passive = 200;
+    uint16_t activeMinMs = static_cast<uint16_t>(dwellMs / 2);
+    if (activeMinMs < 100) activeMinMs = 100;
+    cfg.scan_time.active.min = activeMinMs;
+    cfg.scan_time.active.max = dwellMs;
+    cfg.scan_time.passive = dwellMs;
     cfg.channel_bitmap.ghz_2_channels = bitmap2g;
     cfg.channel_bitmap.ghz_5_channels = bitmap5g;
 
     Serial.printf(
-        "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s\n",
+        "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s "
+        "settle_ms=%lu dwell_ms=%u active=%u-%u passive=%u\n",
         wifiBandModeName(bandMode),
         bitmap2g,
         bitmap5g,
-        cfg.scan_type == WIFI_SCAN_TYPE_PASSIVE ? "passive" : "active"
+        cfg.scan_type == WIFI_SCAN_TYPE_PASSIVE ? "passive" : "active",
+        (unsigned long)settleMs,
+        (unsigned)dwellMs,
+        (unsigned)cfg.scan_time.active.min,
+        (unsigned)cfg.scan_time.active.max,
+        (unsigned)cfg.scan_time.passive
     );
 
-    // Use ESP-IDF's blocking scan. The Arduino SCAN_DONE event path has
-    // proven unreliable on C5, leaving the command waiting until timeout.
-    esp_err_t err = esp_wifi_scan_start(&cfg, true);
-    if (err != ESP_OK) {
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_start failed: %s (%d)\n",
-                      esp_err_to_name(err), (int)err);
+    for (uint8_t attempt = 1; attempt <= WIFI_SCAN_MAX_ATTEMPTS; ++attempt) {
+        // Clear any stale scan state left by a previous failed/aborted scan.
         esp_wifi_scan_stop();
-        return -1;
+        delay(50);
+
+        const uint32_t startedAt = millis();
+        Serial.printf("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
+                      (unsigned)attempt, (unsigned)WIFI_SCAN_MAX_ATTEMPTS);
+        esp_err_t err = esp_wifi_scan_start(&cfg, true);
+        if (err != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: esp_wifi_scan_start attempt %u failed: %s (%d)\n",
+                (unsigned)attempt,
+                esp_err_to_name(err),
+                (int)err
+            );
+            if (attempt < WIFI_SCAN_MAX_ATTEMPTS &&
+                (err == ESP_ERR_WIFI_STATE || err == ESP_ERR_WIFI_NOT_STARTED)) {
+                esp_wifi_scan_stop();
+                delay(settleMs);
+                continue;
+            }
+            finishWifiScan(false);
+            return -1;
+        }
+
+        uint16_t count = 0;
+        err = esp_wifi_scan_get_ap_num(&count);
+        if (err != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: esp_wifi_scan_get_ap_num attempt %u failed: %s (%d)\n",
+                (unsigned)attempt,
+                esp_err_to_name(err),
+                (int)err
+            );
+            if (attempt < WIFI_SCAN_MAX_ATTEMPTS) {
+                esp_wifi_scan_stop();
+                delay(settleMs);
+                continue;
+            }
+            finishWifiScan(false);
+            return -1;
+        }
+
+        const bool lowResult = scanResultLooksLow(count);
+        Serial.printf(
+            "SCAN_WIFI: attempt %u complete in %lu ms, raw_count=%u "
+            "last_good=%u low_result=%s\n",
+            (unsigned)attempt,
+            (unsigned long)(millis() - startedAt),
+            (unsigned)count,
+            (unsigned)g_lastWifiScanGoodCount,
+            lowResult ? "yes" : "no"
+        );
+
+        if (lowResult && attempt < WIFI_SCAN_MAX_ATTEMPTS) {
+            Serial.println(
+                "SCAN_WIFI: empty/low result; retrying after settle"
+            );
+            esp_wifi_scan_stop();
+            delay(settleMs);
+            continue;
+        }
+        if (count > 0) {
+            g_lastWifiScanGoodCount = count;
+            g_lastWifiScanGoodMs = millis();
+        }
+        return (int)count;
     }
 
-    uint16_t count = 0;
-    err = esp_wifi_scan_get_ap_num(&count);
-    if (err != ESP_OK) {
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_get_ap_num failed: %s (%d)\n",
-                      esp_err_to_name(err), (int)err);
-        esp_wifi_scan_stop();
-        return -1;
-    }
-    return (int)count;
+    finishWifiScan(false);
+    return -1;
 }
 
 static bool parseMac(const char* str, uint8_t out[6]) {
@@ -862,8 +982,17 @@ static void radioIdle() {
 
 // ── LD2450 command/event layer ────────────────────────────────────────────────
 static constexpr uint32_t LD2450_BAUD = 256000;
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C5)
+static constexpr int8_t LD2450_DEFAULT_RX_PIN = 6;
+static constexpr int8_t LD2450_DEFAULT_TX_PIN = 7;
+#elif defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32S2)
 static constexpr int8_t LD2450_DEFAULT_RX_PIN = 16;
 static constexpr int8_t LD2450_DEFAULT_TX_PIN = 17;
+#else
+static constexpr int8_t LD2450_DEFAULT_RX_PIN = 18;
+static constexpr int8_t LD2450_DEFAULT_TX_PIN = 19;
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 static const int SAFE_LD2450_GPIOS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
@@ -913,11 +1042,15 @@ static void loadLd2450Config() {
         txPin = prefs.getInt("ld2450_tx_gpio", LD2450_DEFAULT_TX_PIN);
         prefs.end();
     }
-    ld2450RxGpio = isSafeLd2450Pin(rxPin) ? rxPin : -1;
-    ld2450TxGpio = isSafeLd2450Pin(txPin) ? txPin : -1;
+    // Preserve target-safe defaults when NVS is blank or contains the old
+    // -1 "unset" sentinel.
+    if (rxPin < 0 || !isSafeLd2450Pin(rxPin)) rxPin = LD2450_DEFAULT_RX_PIN;
+    if (txPin < 0 || !isSafeLd2450Pin(txPin)) txPin = LD2450_DEFAULT_TX_PIN;
+    ld2450RxGpio = rxPin;
+    ld2450TxGpio = txPin;
     if (ld2450RxGpio == ld2450TxGpio) {
-        ld2450RxGpio = -1;
-        ld2450TxGpio = -1;
+        ld2450RxGpio = LD2450_DEFAULT_RX_PIN;
+        ld2450TxGpio = LD2450_DEFAULT_TX_PIN;
     }
 }
 
@@ -1355,7 +1488,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["device_id"] = getDeviceId();
         char countryCode[4] = {0};
         if (esp_wifi_get_country_code(countryCode) != ESP_OK) {
-            strcpy(countryCode, "01");
+            strcpy(countryCode, "CH");
         }
         resp["country"] = countryCode;
         appendAllowedWifiChannels(resp);
@@ -1824,7 +1957,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             return;
         }
 
-        int n = idf_scan_networks(proto, bandMode);
+        uint32_t settleMs = doc["args"]["settle_ms"] | WIFI_SCAN_DEFAULT_SETTLE_MS;
+        settleMs = constrain(settleMs, WIFI_SCAN_MIN_SETTLE_MS, WIFI_SCAN_MAX_SETTLE_MS);
+        uint16_t dwellMs = doc["args"]["dwell_ms"] | WIFI_SCAN_DEFAULT_DWELL_MS;
+        dwellMs = constrain(dwellMs, WIFI_SCAN_MIN_DWELL_MS, WIFI_SCAN_MAX_DWELL_MS);
+        int n = idf_scan_networks(proto, bandMode, settleMs, dwellMs);
+        if (n == -2) {
+            proto.sendResp(id, false, "scan already in progress");
+            return;
+        }
         if (n < 0) {
             proto.sendResp(id, false, "scan failed");
             return;
@@ -1836,7 +1977,10 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
                 count * sizeof(wifi_ap_record_t));
 
-            if (records && esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
+            esp_err_t recordsErr = records
+                ? esp_wifi_scan_get_ap_records(&count, records)
+                : ESP_ERR_NO_MEM;
+            if (recordsErr == ESP_OK) {
                 for (int i = 0; i < count; i++) {
                     // The C5 scan bitmap can still return both bands in some
                     // IDF/board states. Enforce the requested band here so the
@@ -1867,17 +2011,31 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                     proto.sendEvent("scan_ap", ev);
                     emittedCount++;
                 }
+            } else {
+                Serial.printf(
+                    "SCAN_WIFI: esp_wifi_scan_get_ap_records failed: %s (%d), records=%s\n",
+                    esp_err_to_name(recordsErr),
+                    (int)recordsErr,
+                    records ? "allocated" : "malloc-failed"
+                );
             }
             free(records);
         }
 
-        esp_wifi_scan_stop();
+        finishWifiScan(true);
+        Serial.printf(
+            "SCAN_WIFI: response raw_count=%d emitted_count=%d band=%s\n",
+            n,
+            emittedCount,
+            wifiBandModeName(bandMode)
+        );
 
         JsonDocument resp;
         resp["ok"] = true;
         resp["count"] = emittedCount;
         resp["scanned"] = n;
         resp["band"] = wifiBandModeName(bandMode);
+        resp["dwell_ms"] = dwellMs;
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 
@@ -2561,19 +2719,26 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             resp["error"] = "regulatory_channel_blocked";
             resp["msg"] = regulatoryError;
             resp["channel"] = channel;
-            resp["country"] = cc[0] ? cc : "01";
+            resp["country"] = cc[0] ? cc : "CH";
             appendAllowedWifiChannels(resp);
             String json; serializeJson(resp, json);
             proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
             return;
         }
         const char* bssidStr = doc["args"]["bssid"] | "";
+        const bool showNotice = doc["args"]["show_notice"] | true;
 
         uint8_t targetBssid[6] = {0};
         bool hasTarget = parseMac(bssidStr, targetBssid);
 
         String portalError;
-        bool started = portal.start(ssid, channel, hasTarget ? targetBssid : nullptr, &portalError);
+        bool started = portal.start(
+            ssid,
+            channel,
+            hasTarget ? targetBssid : nullptr,
+            showNotice,
+            &portalError
+        );
         if (started) {
             proto.sendResp(id, true, "portal started");
         } else {

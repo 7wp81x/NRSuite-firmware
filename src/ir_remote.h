@@ -7,8 +7,22 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+// Classic ESP32 legacy RMT allocates memory in 64-symbol blocks. The newer
+// S2/S3/C3/C5 RMT peripherals accept 48-symbol blocks.
+#if defined(CONFIG_IDF_TARGET_ESP32)
+#ifndef IR_RMT_MEM_BLOCK_SYMBOLS
+#define IR_RMT_MEM_BLOCK_SYMBOLS 64
+#endif
+#ifndef IR_RX_MAX_SYMBOLS
+#define IR_RX_MAX_SYMBOLS 64
+#endif
+#else
+#ifndef IR_RMT_MEM_BLOCK_SYMBOLS
+#define IR_RMT_MEM_BLOCK_SYMBOLS 48
+#endif
 #ifndef IR_RX_MAX_SYMBOLS
 #define IR_RX_MAX_SYMBOLS 48
+#endif
 #endif
 
 class BridgeProtocol;
