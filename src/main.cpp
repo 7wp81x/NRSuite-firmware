@@ -19,7 +19,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.3.1"
+#define FW_VERSION "1.0.0-beta.3.1.1"
 
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0

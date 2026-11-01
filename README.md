@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1-yellow.svg)](../../releases)
+[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1.1-yellow.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current release line:** `1.0.0-beta.3.1`. Mesh support from merged mesh branches is present but experimental.
+**Current release line:** `1.0.0-beta.3.1.1`. Mesh support from merged mesh branches is present but experimental.
 
 ---
 
@@ -87,7 +87,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, capture-preserving `DEAUTH_BURST` retries, and firmware-native `DEAUTH_MULTI` with per-target channel scheduling and aggregate/per-target counters. Advertises `deauth_multi`. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
-| WPS Pixie Dust | S3, C5 | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie`. |
+| WPS Pixie Dust | All | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie` on all ESP32 targets. |
 | WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
 | WPS Attempt Detector | All | Passive EAP-WSC monitor that tracks WPS Identity/M1–M8 sessions by BSSID and source client MAC, including channel, RSSI, stage, per-session evidence flags, frame count, and duration. It also emits live WPS lock-state changes for the target BSSID. Android uses M1–M3 material and M7–M8 transfer evidence for risk scoring. Advertises `wps_attempt_detect`. |
 | Deauth Detector | All | Passive deauth/disassoc frame detection with async events |
@@ -110,8 +110,8 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > ESP32-C5 builds advertise `wifi_5ghz` and default shared Wi-Fi scans to
 > `WIFI_BAND_MODE_AUTO`. The 2.4 GHz and 5 GHz C5 paths are hardware-validated.
 > The regulatory country is configured from Android Settings and enforced by
-> the firmware channel mask. C5 and S3 builds also advertise `wps_pixie`; C3
-> builds compile with the feature disabled.
+> the firmware channel mask. All current ESP32 target builds advertise
+> `wps_pixie`; raw-frame injection uses target-appropriate wrapper flags.
 
 ### Portal HTML storage
 
@@ -344,7 +344,7 @@ Features are conditionally compiled based on the target board. Key flags set in 
 | `HID_SUPPORTED` | S2, S3 | Enables USB HID BadUSB |
 | `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3 | Native USB CDC without external UART |
 | `CONFIG_ESP_WIFI_ENABLE_SNIFFER` | All | Enables promiscuous mode for packet capture |
-| `WPS_PIXIE_SUPPORTED` | S3, C5 | Enables the raw WPS Pixie Dust registrar flow and `wps_pixie` capability |
+| `WPS_PIXIE_SUPPORTED` | All | Enables the raw WPS Pixie Dust registrar flow and `wps_pixie` capability |
 
 ---
 
@@ -374,7 +374,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.3.1 | v1.0.0-beta.3.1 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0-beta.3.1.1 | v1.0.0-beta.3.1.1 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
 
