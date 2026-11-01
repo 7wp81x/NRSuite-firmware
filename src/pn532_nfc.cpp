@@ -18,6 +18,14 @@ constexpr uint32_t PN532_TAG_REPEAT_MS = 2500;
 constexpr uint32_t PN532_ERROR_EVENT_INTERVAL_MS = 5000;
 constexpr uint16_t PN532_POLL_TIMEOUT_MS = 120;
 
+#if defined(CONFIG_IDF_TARGET_ESP32)
+constexpr int PN532_DEFAULT_SDA_GPIO = 21;
+constexpr int PN532_DEFAULT_SCL_GPIO = 22;
+#else
+constexpr int PN532_DEFAULT_SDA_GPIO = 8;
+constexpr int PN532_DEFAULT_SCL_GPIO = 9;
+#endif
+
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // GPIO 12-17 are flash, 18/19 are native USB, and 20/21 are UART0.
 static const int SAFE_PN532_GPIOS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
@@ -65,17 +73,21 @@ void Pn532Nfc::begin(BridgeProtocol& proto) {
 }
 
 void Pn532Nfc::loadConfig() {
-    Preferences prefs;
-    if (!prefs.begin("nrsuite", true)) return;
-    _sdaGpio = prefs.getInt("rfid_sda_gpio", -1);
-    _sclGpio = prefs.getInt("rfid_scl_gpio", -1);
-    prefs.end();
+    _sdaGpio = PN532_DEFAULT_SDA_GPIO;
+    _sclGpio = PN532_DEFAULT_SCL_GPIO;
 
-    if (_sdaGpio >= 0 && !isSafePin(_sdaGpio)) _sdaGpio = -1;
-    if (_sclGpio >= 0 && !isSafePin(_sclGpio)) _sclGpio = -1;
+    Preferences prefs;
+    if (prefs.begin("nrsuite", true)) {
+        _sdaGpio = prefs.getInt("rfid_sda_gpio", PN532_DEFAULT_SDA_GPIO);
+        _sclGpio = prefs.getInt("rfid_scl_gpio", PN532_DEFAULT_SCL_GPIO);
+        prefs.end();
+    }
+
+    if (_sdaGpio < 0 || !isSafePin(_sdaGpio)) _sdaGpio = PN532_DEFAULT_SDA_GPIO;
+    if (_sclGpio < 0 || !isSafePin(_sclGpio)) _sclGpio = PN532_DEFAULT_SCL_GPIO;
     if (_sdaGpio == _sclGpio) {
-        _sdaGpio = -1;
-        _sclGpio = -1;
+        _sdaGpio = PN532_DEFAULT_SDA_GPIO;
+        _sclGpio = PN532_DEFAULT_SCL_GPIO;
     }
 }
 

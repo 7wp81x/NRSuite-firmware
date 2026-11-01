@@ -17,6 +17,8 @@ constexpr uint32_t RMT_RESOLUTION_HZ = 1'000'000;
 constexpr size_t IR_TX_MAX_TIMINGS = 1024;
 constexpr int IR_TX_REPEAT_MAX = 10;
 constexpr uint32_t IR_RX_IDLE_TIMEOUT_NS = 12'000'000;
+constexpr int IR_DEFAULT_TX_GPIO = 4;
+constexpr int IR_DEFAULT_RX_GPIO = 5;
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 static const int SAFE_IR_GPIOS[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
@@ -105,13 +107,24 @@ bool IrRemote::isSafePin(int gpio) const {
 }
 
 void IrRemote::loadConfig() {
+    _txGpio = IR_DEFAULT_TX_GPIO;
+    _rxGpio = IR_DEFAULT_RX_GPIO;
+
     Preferences prefs;
-    if (!prefs.begin("nrsuite", true)) return;
-    _txGpio = prefs.getInt("ir_tx_gpio", -1);
-    _rxGpio = prefs.getInt("ir_rx_gpio", -1);
-    prefs.end();
-    if (_txGpio >= 0 && !isSafePin(_txGpio)) _txGpio = -1;
-    if (_rxGpio >= 0 && !isSafePin(_rxGpio)) _rxGpio = -1;
+    if (prefs.begin("nrsuite", true)) {
+        _txGpio = prefs.getInt("ir_tx_gpio", IR_DEFAULT_TX_GPIO);
+        _rxGpio = prefs.getInt("ir_rx_gpio", IR_DEFAULT_RX_GPIO);
+        prefs.end();
+    }
+
+    // Older/blank NVS configurations used -1 for "unset". Fall back to the
+    // target-safe defaults so IR works immediately after flashing.
+    if (_txGpio < 0 || !isSafePin(_txGpio)) _txGpio = IR_DEFAULT_TX_GPIO;
+    if (_rxGpio < 0 || !isSafePin(_rxGpio)) _rxGpio = IR_DEFAULT_RX_GPIO;
+    if (_txGpio == _rxGpio) {
+        _txGpio = IR_DEFAULT_TX_GPIO;
+        _rxGpio = IR_DEFAULT_RX_GPIO;
+    }
     setTxPinIdle();
 }
 
@@ -166,7 +179,7 @@ bool IrRemote::ensureTxChannel(String& error) {
     config.gpio_num = static_cast<gpio_num_t>(_txGpio);
     config.clk_src = RMT_CLK_SRC_DEFAULT;
     config.resolution_hz = RMT_RESOLUTION_HZ;
-    config.mem_block_symbols = 48;
+    config.mem_block_symbols = IR_RMT_MEM_BLOCK_SYMBOLS;
     config.trans_queue_depth = 1;
     config.intr_priority = 0;
     config.flags.invert_out = false;
@@ -208,10 +221,10 @@ bool IrRemote::ensureRxChannel(String& error) {
     config.gpio_num = static_cast<gpio_num_t>(_rxGpio);
     config.clk_src = RMT_CLK_SRC_DEFAULT;
     config.resolution_hz = RMT_RESOLUTION_HZ;
-    // C3/C5 expose 48 RMT words per channel. Keep RX to one RMT memory
-    // block so creating the receiver cannot exhaust the shared TX/RX pool.
-    // 48 symbols is enough for NEC (34 symbols) and typical consumer remotes.
-    config.mem_block_symbols = IR_RX_MAX_SYMBOLS;
+    // Classic ESP32 legacy RMT requires 64-symbol memory blocks; newer
+    // targets use 48. Keep RX to one RMT memory block so creating the
+    // receiver cannot exhaust the shared TX/RX pool.
+    config.mem_block_symbols = IR_RMT_MEM_BLOCK_SYMBOLS;
     config.intr_priority = 0;
     config.flags.invert_in = true;
     config.flags.with_dma = false;
