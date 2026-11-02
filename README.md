@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1.1-yellow.svg)](../../releases)
+[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1.2-yellow.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current release line:** `1.0.0-beta.3.1.1`. Mesh support from merged mesh branches is present but experimental.
+**Current release line:** `1.0.0-beta.3.1.2`. Mesh support from merged mesh branches is present but experimental.
 
 ---
 
@@ -374,7 +374,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.3.1.1 | v1.0.0-beta.3.1.1 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0-beta.3.1.2 | v1.0.0-beta.3.1.2 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
 
