@@ -39,15 +39,16 @@ DeauthDetector* DeauthDetector::_instance = nullptr;
 void DeauthDetector::begin(BridgeProtocol& proto) {
     _proto = &proto;
     _instance = this;
-    if (!_queue) {
-        _queue = xQueueCreate(DEAUTH_DETECT_QUEUE_DEPTH, sizeof(Alert));
-    }
     memset(_ssidCache, 0, sizeof(_ssidCache));
     esp_wifi_set_promiscuous(false);
 }
 
 bool DeauthDetector::start(const DeauthDetectConfig& config) {
     if (_active) stop();
+    if (!_queue) {
+        _queue = xQueueCreate(DEAUTH_DETECT_QUEUE_DEPTH, sizeof(Alert));
+        if (!_queue) return false;
+    }
 
     if (config.hop) {
         _hopMode = true;

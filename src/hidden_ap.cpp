@@ -68,14 +68,15 @@ static bool findSsidIe(
 void HiddenApDetector::begin(BridgeProtocol& proto) {
     _proto = &proto;
     _instance = this;
-    if (!_queue) {
-        _queue = xQueueCreate(HIDDEN_AP_QUEUE_DEPTH, sizeof(Event));
-    }
     esp_wifi_set_promiscuous(false);
 }
 
 bool HiddenApDetector::start(const HiddenApConfig& config) {
     if (_active) stop();
+    if (!_queue) {
+        _queue = xQueueCreate(HIDDEN_AP_QUEUE_DEPTH, sizeof(Event));
+        if (!_queue) return false;
+    }
 
     if (config.hop) {
         _hopMode = true;

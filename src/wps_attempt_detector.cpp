@@ -61,12 +61,6 @@ WpsAttemptDetector* WpsAttemptDetector::instance_ = nullptr;
 void WpsAttemptDetector::begin(BridgeProtocol& proto) {
     proto_ = &proto;
     instance_ = this;
-    if (eventQueue_ == nullptr) {
-        eventQueue_ = xQueueCreate(48, sizeof(AttemptEvent));
-    }
-    if (lockEventQueue_ == nullptr) {
-        lockEventQueue_ = xQueueCreate(32, sizeof(LockEvent));
-    }
 }
 
 void WpsAttemptDetector::promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
@@ -460,6 +454,13 @@ bool WpsAttemptDetector::start(
     bool include5ghz
 ) {
     stop();
+    if (eventQueue_ == nullptr) {
+        eventQueue_ = xQueueCreate(48, sizeof(AttemptEvent));
+    }
+    if (lockEventQueue_ == nullptr) {
+        lockEventQueue_ = xQueueCreate(32, sizeof(LockEvent));
+    }
+    if (eventQueue_ == nullptr || lockEventQueue_ == nullptr) return false;
     hopChannelCount_ = 0;
     if (channelCount > 0) {
         for (size_t index = 0; index < channelCount && hopChannelCount_ < 64; ++index) {
