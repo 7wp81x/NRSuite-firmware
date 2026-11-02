@@ -39,22 +39,11 @@ void addNoCacheHeaders(AsyncWebServerResponse* response) {
 void PortalManager::begin(BridgeProtocol& proto) {
     _proto = &proto;
 
-    // Bind the HTTP listener once for the life of the firmware. Repeatedly
-    // closing and reopening port 80 after a portal restart can leave the old
-    // lwIP socket in a transient state; AsyncWebServer::begin() has no return
-    // value, so a failed re-bind silently produces "connection refused".
-    String serverError;
-    if (!setupHttpServer(&serverError)) {
-        Serial.printf("PORTAL: persistent HTTP listener init failed: %s\n",
-                      serverError.c_str());
-    } else {
-        Serial.println("PORTAL: persistent HTTP listener initialized");
-    }
-    if (!setupDNSSpoof()) {
-        Serial.println("PORTAL: persistent DNS responder init failed");
-    } else {
-        Serial.println("PORTAL: persistent DNS responder initialized");
-    }
+    // Keep boot memory free. The HTTP/DNS listeners are still created once and
+    // remain bound across portal start/stop cycles; they are initialized lazily
+    // by start() on first portal use. Allocating them during every boot leaves
+    // the ESP32-S2 with almost no heap and prevents normal USB commands from
+    // allocating their JSON responses.
 }
 
 bool PortalManager::setupDNSSpoof() {
