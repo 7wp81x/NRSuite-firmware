@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <algorithm>
+#include <cstdio>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include "BridgeProtocol.h"
@@ -19,7 +21,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.3.1.1"
+#define FW_VERSION "1.0.0-beta.3.1.2"
 
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0
@@ -3557,10 +3559,26 @@ void sendHeartbeat() {
     if (millis() - last < 5000) return;
     last = millis();
 
-    JsonDocument doc;
-    doc["uptime"] = millis();
-    doc["heap"]   = ESP.getFreeHeap();
-    proto.sendEvent("heartbeat", doc);
+    // Keep the heartbeat independent of ArduinoJson dynamic allocation. On S2
+    // the JSON document path has been observed producing an empty object,
+    // while the protocol frame itself remained valid. A fixed stack buffer
+    // guarantees the monitor always receives a readable heartbeat payload.
+    char payload[96];
+    const int length = std::snprintf(
+        payload,
+        sizeof(payload),
+        "{\"uptime\":%lu,\"heap\":%lu,\"type\":\"heartbeat\"}",
+        static_cast<unsigned long>(millis()),
+        static_cast<unsigned long>(ESP.getFreeHeap()));
+    if (length <= 0) return;
+    const size_t payloadLength = std::min<size_t>(
+        static_cast<size_t>(length),
+        sizeof(payload) - 1);
+    proto.sendRaw(
+        TYPE_EVENT,
+        0,
+        reinterpret_cast<const uint8_t*>(payload),
+        static_cast<uint32_t>(payloadLength));
 }
 
 // ── Setup ──────────────────────────────────────────────────────────────────

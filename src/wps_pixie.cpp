@@ -120,9 +120,6 @@ bool wpsPixieSupported() {
 
 void WpsPixieManager::begin(BridgeProtocol& proto) {
     proto_ = &proto;
-    if (rxQueue_ == nullptr) {
-        rxQueue_ = xQueueCreate(12, sizeof(RxFrame));
-    }
 }
 
 bool WpsPixieManager::active() const {
@@ -159,8 +156,11 @@ bool WpsPixieManager::startAttempt(
         return false;
     }
     if (rxQueue_ == nullptr) {
-        error = "wps_pixie_not_initialized";
-        return false;
+        rxQueue_ = xQueueCreate(12, sizeof(RxFrame));
+        if (rxQueue_ == nullptr) {
+            error = "wps_pixie_queue_failed";
+            return false;
+        }
     }
 
     runId_ = runId;

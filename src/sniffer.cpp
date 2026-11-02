@@ -38,8 +38,8 @@ static uint16_t channelToFreqMHz(uint8_t ch) {
 void Sniffer::begin(BridgeProtocol& proto) {
     _proto = &proto;
     _instance = this;
-    _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
-    _clientQueue = xQueueCreate(CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent));
+    // Queues are allocated on first use so S2-class boards keep their heap
+    // available for USB command/response handling at boot.
 
     WiFi.disconnect();
     esp_wifi_set_promiscuous(false);
@@ -88,6 +88,13 @@ bool Sniffer::isValidChannel(uint8_t channel, bool include5ghz) const {
 
 bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz) {
     if (!isValidChannel(channel, include5ghz)) return false;
+    if (!_queue) {
+        _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
+    }
+    if (!_clientQueue) {
+        _clientQueue = xQueueCreate(CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent));
+    }
+    if (!_queue || !_clientQueue) return false;
     _clientOnly = clientOnly;
     _include5ghz = include5ghz;
 
@@ -393,7 +400,7 @@ void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
 
 // ── processQueue — call from loop() ──────────────────────────────────────
 void Sniffer::processQueue() {
-    if (!_proto) return;
+    if (!_proto || !_queue) return;
 
     processClientEvents();
 
