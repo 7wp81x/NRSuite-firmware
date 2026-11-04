@@ -108,6 +108,24 @@ psram_total, psram_free, chip_cores, cpu_mhz, flash_size, sdk
 
 `psram_total` and `psram_free` are zero when the target has no PSRAM.
 
+### RAM diagnostics
+
+Firmware prints one compact line for non-noise module commands:
+
+```text
+[mem] cmd=SNIFF_START start_ms=... end_ms=... duration_ms=... free_before=... free_after=... min_free=... largest=...
+```
+
+The Android app prints one line when a module opens and closes:
+
+```bash
+adb logcat -s NRSuiteMem:I NRSuiteWire:I
+```
+
+Each Android line includes Java/native heap and the latest firmware heap
+snapshot. `PING`, `STATUS`, and `HEAP` commands are intentionally excluded from
+the firmware memory log to keep the output minimal.
+
 ---
 
 ## Features

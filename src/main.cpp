@@ -1238,7 +1238,7 @@ static void sendRfidStatusResp(
     proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 }
 
-void handleCmd(uint8_t id, JsonDocument& doc) {
+void handleCmdImpl(uint8_t id, JsonDocument& doc) {
     const char* cmd = doc["cmd"] | "";
     if (cmd[0] == '\0') {
         proto.sendResp(id, false, "missing cmd");
@@ -3585,6 +3585,32 @@ void handleAck(uint32_t chunk_index) {
     sniffer.onAck(chunk_index);
 }
 
+static void handleCmdWithMemoryLog(uint8_t id, JsonDocument& doc) {
+    const char* cmd = doc["cmd"] | "";
+    const bool noisy = strcmp(cmd, "PING") == 0 ||
+                       strcmp(cmd, "STATUS") == 0 ||
+                       strcmp(cmd, "HEAP") == 0;
+    if (noisy) {
+        handleCmdImpl(id, doc);
+        return;
+    }
+
+    const uint32_t startedMs = millis();
+    const uint32_t freeBefore = ESP.getFreeHeap();
+    handleCmdImpl(id, doc);
+    const uint32_t endedMs = millis();
+    Serial.printf(
+        "[mem] cmd=%s start_ms=%lu end_ms=%lu duration_ms=%lu free_before=%lu free_after=%lu min_free=%lu largest=%lu\n",
+        cmd[0] ? cmd : "unknown",
+        static_cast<unsigned long>(startedMs),
+        static_cast<unsigned long>(endedMs),
+        static_cast<unsigned long>(endedMs - startedMs),
+        static_cast<unsigned long>(freeBefore),
+        static_cast<unsigned long>(ESP.getFreeHeap()),
+        static_cast<unsigned long>(ESP.getMinFreeHeap()),
+        static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+}
+
 void sendHeartbeat() {
     static uint32_t last = 0;
     if (millis() - last < 5000) return;
@@ -3697,7 +3723,7 @@ void setup() {
 
     // Initialise subsystems
     proto.begin();
-    proto.onCmd(handleCmd);
+    proto.onCmd(handleCmdWithMemoryLog);
     proto.onAck(handleAck);
 
     proto.onHtml([](const uint8_t* data, size_t len) {
