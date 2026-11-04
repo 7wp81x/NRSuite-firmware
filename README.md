@@ -110,21 +110,32 @@ psram_total, psram_free, chip_cores, cpu_mhz, flash_size, sdk
 
 ### RAM diagnostics
 
-Firmware prints one compact line for non-noise module commands:
+Firmware sends a compact `mem` event for non-noise module commands:
 
-```text
-[mem] cmd=SNIFF_START start_ms=... end_ms=... duration_ms=... free_before=... free_after=... min_free=... largest=...
+```json
+{
+  "type": "mem",
+  "cmd": "SNIFF_START",
+  "start_ms": 123456,
+  "end_ms": 123789,
+  "duration_ms": 333,
+  "free_before": 90612,
+  "free_after": 90000,
+  "min_free": 85980,
+  "largest": 61428,
+  "transport": "uart0"
+}
 ```
 
-The Android app prints one line when a module opens and closes:
+The Android app prints module lifecycle lines and forwards these firmware events:
 
 ```bash
-adb logcat -s NRSuiteMem:I NRSuiteWire:I
+adb logcat -s NRSuiteMem:I NRSuiteFirmwareMem:I NRSuiteWire:I
 ```
 
-Each Android line includes Java/native heap and the latest firmware heap
-snapshot. `PING`, `STATUS`, and `HEAP` commands are intentionally excluded from
-the firmware memory log to keep the output minimal.
+`PING`, `STATUS`, and `HEAP` commands are intentionally excluded from the
+firmware memory event to keep output minimal. The event is sent through the
+normal protocol transport, so it does not corrupt UART-only firmware streams.
 
 ---
 

@@ -3599,16 +3599,20 @@ static void handleCmdWithMemoryLog(uint8_t id, JsonDocument& doc) {
     const uint32_t freeBefore = ESP.getFreeHeap();
     handleCmdImpl(id, doc);
     const uint32_t endedMs = millis();
-    Serial.printf(
-        "[mem] cmd=%s start_ms=%lu end_ms=%lu duration_ms=%lu free_before=%lu free_after=%lu min_free=%lu largest=%lu\n",
-        cmd[0] ? cmd : "unknown",
-        static_cast<unsigned long>(startedMs),
-        static_cast<unsigned long>(endedMs),
-        static_cast<unsigned long>(endedMs - startedMs),
-        static_cast<unsigned long>(freeBefore),
-        static_cast<unsigned long>(ESP.getFreeHeap()),
-        static_cast<unsigned long>(ESP.getMinFreeHeap()),
-        static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+
+    // Keep diagnostics out of the UART protocol stream. On UART-only builds
+    // Serial is the protocol transport, so a raw printf would corrupt frames.
+    JsonDocument mem;
+    mem["cmd"] = cmd[0] ? cmd : "unknown";
+    mem["start_ms"] = startedMs;
+    mem["end_ms"] = endedMs;
+    mem["duration_ms"] = endedMs - startedMs;
+    mem["free_before"] = freeBefore;
+    mem["free_after"] = ESP.getFreeHeap();
+    mem["min_free"] = ESP.getMinFreeHeap();
+    mem["largest"] = ESP.getMaxAllocHeap();
+    mem["transport"] = proto.activeTransportName();
+    proto.sendEvent("mem", mem);
 }
 
 void sendHeartbeat() {
