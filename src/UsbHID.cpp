@@ -8,6 +8,7 @@
 #include <USB.h>
 #include "USBHIDKeyboard.h"
 #include <Arduino.h>
+#include "NrDebugLog.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2)
     #define LED_PIN 17
@@ -135,17 +136,17 @@ bool UsbHID::runIfArmed() {
     String script;
     if (!MassStorage::readFile(filename.c_str(), script)) {
         if (!loadScript(script)) {
-            Serial.printf("Failed to read ducky file: %s\n", filename.c_str());
+            NRSUITE_DEBUG_PRINTF("Failed to read ducky file: %s\n", filename.c_str());
             return false;
         }
-        Serial.println("Loaded ducky script from NVS fallback store.");
+        NRSUITE_DEBUG_PRINTLN("Loaded ducky script from NVS fallback store.");
     }
 
     if (duckmscMode) {
         MassStorage::setup();
     }
 
-    Serial.printf("Executing armed ducky script: %s (%d bytes)\n", filename.c_str(), script.length());
+    NRSUITE_DEBUG_PRINTF("Executing armed ducky script: %s (%d bytes)\n", filename.c_str(), script.length());
     runScript(script);
     return true;
 }
@@ -334,13 +335,13 @@ void UsbHID::runScript(const String& script) {
             MassStorage::setup();
         }
         else {
-            Serial.printf("Unknown command: %s\n", cmd.c_str());
+            NRSUITE_DEBUG_PRINTF("Unknown command: %s\n", cmd.c_str());
         }
 
         delay(40);
     }
 
-    Serial.println("Ducky script finished.");
+    NRSUITE_DEBUG_PRINTLN("Ducky script finished.");
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2)
     pinMode(LED_PIN, OUTPUT);

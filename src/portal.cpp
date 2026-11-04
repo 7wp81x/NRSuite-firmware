@@ -1,3 +1,4 @@
+#include "NrDebugLog.h"
 #include "portal.h"
 #include "sniffer.h"
 
@@ -98,7 +99,7 @@ bool PortalManager::restoreIdleAp() {
     idlePass[8] = '\0';
 
     const bool ok = WiFi.softAP(idleSsid, idlePass, 1, 1, 1);
-    Serial.printf("PORTAL: hidden idle AP restore %s\n", ok ? "ok" : "failed");
+    NRSUITE_DEBUG_PRINTF("PORTAL: hidden idle AP restore %s\n", ok ? "ok" : "failed");
     return ok;
 }
 
@@ -117,7 +118,7 @@ void PortalManager::cleanupFailedStart() {
     restoreIdleAp();
     if (_htmlFile) _htmlFile.close();
     unmountPortalStorage();
-    Serial.printf("PORTAL: start failure cleanup complete, heap=%lu\n",
+    NRSUITE_DEBUG_PRINTF("PORTAL: start failure cleanup complete, heap=%lu\n",
                   (unsigned long)ESP.getFreeHeap());
 }
 
@@ -344,7 +345,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     stop();  // always clean up any previous state, even if a prior start() failed partway
     _showNotice = showNotice;
 
-    Serial.printf(
+    NRSUITE_DEBUG_PRINTF(
         "PORTAL: start ssid='%s' channel=%u notice=%s heap=%lu\n",
         ssid ? ssid : "",
         (unsigned)channel,
@@ -356,11 +357,11 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     // no AP/server can be left half-started.
     if (!mountPortalStorage()) {
         if (error) *error = "portal storage mount failed";
-        Serial.println("PORTAL: storage mount failed before AP start");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: storage mount failed before AP start");
         cleanupFailedStart();
         return false;
     }
-    Serial.println("PORTAL: storage mounted");
+    NRSUITE_DEBUG_PRINTLN("PORTAL: storage mounted");
 
     // Keep the radio in APSTA mode. Do not cycle through STA mode here: on
     // Arduino-ESP32 that can create a visible default open ESP_XXXXXX SoftAP
@@ -373,14 +374,14 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     bool apReady = false;
     esp_err_t err = ESP_OK;
     for (uint8_t attempt = 1; attempt <= PORTAL_AP_START_ATTEMPTS; ++attempt) {
-        Serial.printf("PORTAL: softAP start attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: softAP start attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)PORTAL_AP_START_ATTEMPTS);
         WiFi.softAPdisconnect(true);
         delay(PORTAL_AP_RESET_SETTLE_MS);
 
         const bool apOk = WiFi.softAP(ssid, nullptr, channel);
         if (!apOk) {
-            Serial.println("PORTAL: WiFi.softAP returned false");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAP returned false");
             if (attempt < PORTAL_AP_START_ATTEMPTS) {
                 delay(PORTAL_AP_RETRY_SETTLE_MS);
                 continue;
@@ -395,7 +396,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             IPAddress(255, 255, 255, 0)
         );
         if (!cfgOk) {
-            Serial.println("PORTAL: WiFi.softAPConfig failed");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAPConfig failed");
             _apStarted = false;
             WiFi.softAPdisconnect(true);
             if (attempt < PORTAL_AP_START_ATTEMPTS) {
@@ -415,7 +416,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
                 configuredSsidLen <= sizeof(cfg.ap.ssid) &&
                 memcmp(cfg.ap.ssid, ssid, configuredSsidLen) == 0;
             if (!ssidMatches) {
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "PORTAL: softAP reported success but configured SSID length=%u "
                     "does not match requested length=%u\n",
                     (unsigned)configuredSsidLen,
@@ -428,7 +429,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             }
         }
         if (err != ESP_OK) {
-            Serial.printf("PORTAL: AP channel config failed: %s (%d)\n",
+            NRSUITE_DEBUG_PRINTF("PORTAL: AP channel config failed: %s (%d)\n",
                           esp_err_to_name(err), (int)err);
             _apStarted = false;
             WiFi.softAPdisconnect(true);
@@ -441,7 +442,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
 
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            Serial.printf("PORTAL: esp_wifi_start failed: %s (%d)\n",
+            NRSUITE_DEBUG_PRINTF("PORTAL: esp_wifi_start failed: %s (%d)\n",
                           esp_err_to_name(err), (int)err);
             _apStarted = false;
             WiFi.softAPdisconnect(true);
@@ -453,7 +454,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
 
         apReady = true;
-        Serial.printf("PORTAL: softAP up, ssid='%s' ip=%s\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: softAP up, ssid='%s' ip=%s\n",
                       ssid,
                       WiFi.softAPIP().toString().c_str());
         break;
@@ -467,7 +468,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
                 *error += esp_err_to_name(err);
             }
         }
-        Serial.println("PORTAL: softAP could not be brought up cleanly");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: softAP could not be brought up cleanly");
         cleanupFailedStart();
         return false;
     }
@@ -475,7 +476,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
 
     bool runtimeReady = false;
     for (uint8_t attempt = 1; attempt <= PORTAL_RUNTIME_INIT_ATTEMPTS; ++attempt) {
-        Serial.printf("PORTAL: HTTP/DNS init attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: HTTP/DNS init attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)PORTAL_RUNTIME_INIT_ATTEMPTS);
         if (!setupHttpServer(error)) {
             teardownServerAndDns();
@@ -484,13 +485,13 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
         if (!setupDNSSpoof()) {
             if (error) *error = "DNS server start failed";
-            Serial.println("PORTAL: DNS server start failed");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: DNS server start failed");
             teardownServerAndDns();
             delay(PORTAL_AP_RESET_SETTLE_MS);
             continue;
         }
         runtimeReady = true;
-        Serial.println("PORTAL: HTTP and DNS servers started");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: HTTP and DNS servers started");
         break;
     }
 
@@ -508,7 +509,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         Sniffer::instance()->startFixed(channel);
         xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle);
     }
-    Serial.printf("PORTAL: started successfully, heap=%lu\n",
+    NRSUITE_DEBUG_PRINTF("PORTAL: started successfully, heap=%lu\n",
                   (unsigned long)ESP.getFreeHeap());
     return true;
 }
@@ -639,7 +640,7 @@ void PortalManager::stop() {
     _htmlExpected = 0;
     _htmlComplete = false;
     if (hadRuntime) {
-        Serial.printf("PORTAL: stopped, AP reset/settled, heap=%lu\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: stopped, AP reset/settled, heap=%lu\n",
                       (unsigned long)ESP.getFreeHeap());
     }
 }

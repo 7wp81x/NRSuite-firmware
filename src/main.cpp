@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "NrDebugLog.h"
 #include <algorithm>
 #include <cstdio>
 #include <ArduinoJson.h>
@@ -260,7 +261,7 @@ static void applyStoredWifiCountry() {
     if (country.length() != 2) country = "CH";
     const esp_err_t err = esp_wifi_set_country_code(country.c_str(), false);
     if (err != ESP_OK) {
-        Serial.printf("WiFi country %s rejected: %s (%d)\n",
+        NRSUITE_DEBUG_PRINTF("WiFi country %s rejected: %s (%d)\n",
                       country.c_str(), esp_err_to_name(err), (int)err);
         esp_wifi_set_country_code("CH", false);
     }
@@ -357,7 +358,7 @@ static int idf_scan_networks(
     (void)proto;
 
     if (g_wifiScanInProgress) {
-        Serial.println("SCAN_WIFI: rejected because another scan is already in progress");
+        NRSUITE_DEBUG_PRINTLN("SCAN_WIFI: rejected because another scan is already in progress");
         return -2;
     }
     g_wifiScanInProgress = true;
@@ -368,7 +369,7 @@ static int idf_scan_networks(
         // bitmap below restricts the scan to the requested band.
         const esp_err_t bandErr = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
         if (bandErr != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: failed to enable dual-band mode: %s (%d)\n",
                 esp_err_to_name(bandErr),
                 (int)bandErr
@@ -383,7 +384,7 @@ static int idf_scan_networks(
     const uint32_t sinceLastScanMs = millis() - g_lastWifiScanEndMs;
     if (sinceLastScanMs < settleMs) {
         const uint32_t waitMs = settleMs - sinceLastScanMs;
-        Serial.printf("SCAN_WIFI: settling for %lu ms before scan\n",
+        NRSUITE_DEBUG_PRINTF("SCAN_WIFI: settling for %lu ms before scan\n",
                       (unsigned long)waitMs);
         delay(waitMs);
     }
@@ -421,7 +422,7 @@ static int idf_scan_networks(
     cfg.channel_bitmap.ghz_2_channels = bitmap2g;
     cfg.channel_bitmap.ghz_5_channels = bitmap5g;
 
-    Serial.printf(
+    NRSUITE_DEBUG_PRINTF(
         "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s "
         "settle_ms=%lu dwell_ms=%u active=%u-%u passive=%u\n",
         wifiBandModeName(bandMode),
@@ -441,11 +442,11 @@ static int idf_scan_networks(
         delay(50);
 
         const uint32_t startedAt = millis();
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)WIFI_SCAN_MAX_ATTEMPTS);
         esp_err_t err = esp_wifi_scan_start(&cfg, true);
         if (err != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: esp_wifi_scan_start attempt %u failed: %s (%d)\n",
                 (unsigned)attempt,
                 esp_err_to_name(err),
@@ -464,7 +465,7 @@ static int idf_scan_networks(
         uint16_t count = 0;
         err = esp_wifi_scan_get_ap_num(&count);
         if (err != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: esp_wifi_scan_get_ap_num attempt %u failed: %s (%d)\n",
                 (unsigned)attempt,
                 esp_err_to_name(err),
@@ -480,7 +481,7 @@ static int idf_scan_networks(
         }
 
         const bool lowResult = scanResultLooksLow(count);
-        Serial.printf(
+        NRSUITE_DEBUG_PRINTF(
             "SCAN_WIFI: attempt %u complete in %lu ms, raw_count=%u "
             "last_good=%u low_result=%s\n",
             (unsigned)attempt,
@@ -491,7 +492,7 @@ static int idf_scan_networks(
         );
 
         if (lowResult && attempt < WIFI_SCAN_MAX_ATTEMPTS) {
-            Serial.println(
+            NRSUITE_DEBUG_PRINTLN(
                 "SCAN_WIFI: empty/low result; retrying after settle"
             );
             esp_wifi_scan_stop();
@@ -821,7 +822,7 @@ static void deauthMultiTaskFn(void*) {
                 target.requested += attempted;
                 target.failed += attempted;
                 gDeauthMultiFailed += attempted;
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
                     gDeauthMultiCurrentBssid,
                     target.channel,
@@ -910,7 +911,7 @@ static void runDeauthMultiBurst() {
             target.requested += gDeauthMultiCountPerTarget;
             target.failed += gDeauthMultiCountPerTarget;
             gDeauthMultiFailed += gDeauthMultiCountPerTarget;
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
                 gDeauthMultiCurrentBssid,
                 target.channel,
@@ -2058,7 +2059,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
                     emittedCount++;
                 }
             } else {
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "SCAN_WIFI: esp_wifi_scan_get_ap_records failed: %s (%d), records=%s\n",
                     esp_err_to_name(recordsErr),
                     (int)recordsErr,
@@ -2069,7 +2070,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         }
 
         finishWifiScan(true);
-        Serial.printf(
+        NRSUITE_DEBUG_PRINTF(
             "SCAN_WIFI: response raw_count=%d emitted_count=%d band=%s\n",
             n,
             emittedCount,
