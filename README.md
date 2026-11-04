@@ -294,6 +294,26 @@ That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
 
 ## Flashing
 
+### Flash all connected boards through a hub
+
+The helper script probes every detected serial port with `esptool chip-id`,
+chooses the matching PlatformIO environment, uploads the current build, and
+skips ports that do not respond as an ESP32:
+
+```bash
+./tools/flash_all_boards.sh
+```
+
+You can also provide explicit ports:
+
+```bash
+./tools/flash_all_boards.sh /dev/ttyUSB0 /dev/ttyACM0
+```
+
+Requirements: `jq`, a working `.pio/penv`, and one serial port per physical board.
+If a board exposes both UART and native USB simultaneously, either pass one port
+explicitly or expect the same firmware to be uploaded once through each port.
+
 ### Option A: Flash from the NRSuite Android app (recommended)
 
 The Android app has a built-in ESP32 flasher. Connect your board via USB-OTG and use the flasher screen to upload the latest firmware binary from the [Releases](../../releases) page.
