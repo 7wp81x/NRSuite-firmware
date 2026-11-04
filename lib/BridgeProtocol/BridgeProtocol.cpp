@@ -182,6 +182,16 @@ void BridgeProtocol::sendRaw(uint8_t type, uint8_t id, const uint8_t* payload, u
     if (_txMutex) xSemaphoreGive(_txMutex);
 }
 
+void BridgeProtocol::flushActive() {
+    if (_transportCount == 0) return;
+    if (_activeTransport >= _transportCount) _activeTransport = 0;
+    Stream* stream = _transports[_activeTransport].stream;
+    if (stream == nullptr) return;
+    if (_txMutex) xSemaphoreTake(_txMutex, portMAX_DELAY);
+    stream->flush();
+    if (_txMutex) xSemaphoreGive(_txMutex);
+}
+
 const char* BridgeProtocol::activeTransportName() const {
     if (_transportCount == 0) return "unknown";
     const uint8_t index = _activeTransport < _transportCount ? _activeTransport : 0;

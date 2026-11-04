@@ -1265,6 +1265,18 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+    // ── EXPLICIT DEVICE REBOOT ────────────────────────────────────────────
+    else if (strcmp(cmd, "REBOOT") == 0) {
+        // Reboot is never automatic. Acknowledge first, drain the active
+        // transport, and then restart so the app can surface deterministic
+        // feedback before USB re-enumerates.
+        proto.sendResp(id, true, "rebooting");
+        proto.flushActive();
+        delay(250);
+        ESP.restart();
+        return;
+    }
+
     // ── WPS PIXIE DUST ────────────────────────────────────────────────────
     else if (strcmp(cmd, "WPS_PIXIE_ATTEMPT") == 0) {
         if (!wpsPixieSupported()) {
@@ -1540,6 +1552,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         features.add("deauth_detect");
         features.add("beacon");
         features.add("portal");
+        features.add("reboot");
         features.add("portal_html_offset");
         features.add("html_diag");
         features.add("stop_all");
@@ -2942,10 +2955,12 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             // with less has been observed to exhaust the heap and reset the
             // USB device. Refuse before allocation instead of crashing.
             constexpr uint32_t BLE_HID_MIN_FREE_HEAP = 90 * 1024;
+            constexpr uint32_t BLE_HID_MIN_LARGEST_BLOCK = 48 * 1024;
             const uint32_t freeHeap = ESP.getFreeHeap();
             const uint32_t largestBlock = ESP.getMaxAllocHeap();
             if (!BleHid::isInitialized() &&
-                (freeHeap < BLE_HID_MIN_FREE_HEAP || largestBlock < 48 * 1024)) {
+                (freeHeap < BLE_HID_MIN_FREE_HEAP ||
+                 largestBlock < BLE_HID_MIN_LARGEST_BLOCK)) {
                 char message[96];
                 snprintf(
                     message,
@@ -2953,7 +2968,18 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
                     "insufficient heap for BLE HID (free=%lu largest=%lu)",
                     static_cast<unsigned long>(freeHeap),
                     static_cast<unsigned long>(largestBlock));
-                proto.sendResp(id, false, message);
+                JsonDocument resp;
+                resp["ok"] = false;
+                resp["error"] = "insufficient_heap_for_ble_hid";
+                resp["msg"] = message;
+                resp["heap"] = freeHeap;
+                resp["heap_max_alloc"] = largestBlock;
+                resp["required_heap"] = BLE_HID_MIN_FREE_HEAP;
+                resp["required_largest_block"] = BLE_HID_MIN_LARGEST_BLOCK;
+                resp["transport"] = proto.activeTransportName();
+                String json;
+                serializeJson(resp, json);
+                proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
                 return;
             }
             radioIdle();

@@ -50,6 +50,9 @@ public:
     void sendEvent(const char* type, JsonDocument& doc);
     void sendPcapChunk(uint8_t chunk_idx, const uint8_t* data, uint32_t len);
     void sendRaw(uint8_t type, uint8_t id, const uint8_t* payload, uint32_t len);
+    // Wait for the active transport's transmit buffer to drain. Used before an
+    // explicit reboot so the acknowledgement reaches the host first.
+    void flushActive();
     uint32_t oversizedFrameCount() const { return _oversizedFrames; }
     void onHtml(HtmlCallback cb) { _onHtml = cb; }
     const char* activeTransportName() const;
