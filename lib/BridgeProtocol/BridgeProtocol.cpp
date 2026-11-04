@@ -1,5 +1,16 @@
 #include "BridgeProtocol.h"
 
+void BridgeProtocol::addTransport(Stream& stream, const char* transportName) {
+    if (_transportCount >= PROTO_MAX_TRANSPORTS) return;
+    for (uint8_t i = 0; i < _transportCount; ++i) {
+        if (_transports[i].stream == &stream) return;
+    }
+    _transports[_transportCount].stream = &stream;
+    _transports[_transportCount].name = transportName ? transportName : "unknown";
+    _transports[_transportCount].bufLen = 0;
+    ++_transportCount;
+}
+
 void BridgeProtocol::begin() {
     if (!_txMutex) {
         _txMutex = xSemaphoreCreateMutex();
@@ -7,49 +18,49 @@ void BridgeProtocol::begin() {
 }
 
 void BridgeProtocol::update() {
-    while (true) {
-        while (_stream.available()) {
-            if (_bufLen < sizeof(_buf)) {
-                _buf[_bufLen++] = _stream.read();
+    for (uint8_t i = 0; i < _transportCount; ++i) {
+        Transport& transport = _transports[i];
+        if (transport.stream == nullptr) continue;
+
+        while (transport.stream->available()) {
+            if (transport.bufLen < sizeof(transport.buf)) {
+                transport.buf[transport.bufLen++] = transport.stream->read();
             } else {
-                _resync();
-                if (_bufLen >= sizeof(_buf)) {
-                    memmove(_buf, _buf + 1, --_bufLen);
+                _resync(transport);
+                if (transport.bufLen >= sizeof(transport.buf)) {
+                    memmove(transport.buf, transport.buf + 1, --transport.bufLen);
                 }
             }
-            while (_tryParse());
+            while (_tryParse(transport));
         }
-
-        delay(1);
-        if (!_stream.available()) break;
     }
 }
 
-bool BridgeProtocol::_tryParse() {
-    if (_bufLen < PROTO_HEADER_SZ) return false;
+bool BridgeProtocol::_tryParse(Transport& transport) {
+    if (transport.bufLen < PROTO_HEADER_SZ) return false;
 
     uint8_t  ptype = 0;
     uint8_t  pid   = 0;
     uint32_t len   = 0;
-    if (!protoDecodeHeader(_buf, _bufLen, ptype, pid, len)) {
-        _resync();
+    if (!protoDecodeHeader(transport.buf, transport.bufLen, ptype, pid, len)) {
+        _resync(transport);
         return false;
     }
 
     if (len > PROTO_MAX_CHUNK) {
         _oversizedFrames++;
-        _resync();
+        _resync(transport);
         return false;
     }
 
     uint32_t total = PROTO_HEADER_SZ + len;
-    if (total > sizeof(_buf)) {
+    if (total > sizeof(transport.buf)) {
         _oversizedFrames++;
-        _resync();
+        _resync(transport);
         return false;
     }
 
-    if (_bufLen < total) {
+    if (transport.bufLen < total) {
         return false;
     }
 
@@ -57,34 +68,43 @@ bool BridgeProtocol::_tryParse() {
     f.type    = ptype;
     f.id      = pid;
     f.length  = len;
-    f.payload = _buf + PROTO_HEADER_SZ;
+    f.payload = transport.buf + PROTO_HEADER_SZ;
     f.valid   = true;
 
-    _dispatch(f);
+    _dispatch(f, transport);
 
     // Shift buffer
-    memmove(_buf, _buf + total, _bufLen - total);
-    _bufLen -= total;
+    memmove(transport.buf, transport.buf + total, transport.bufLen - total);
+    transport.bufLen -= total;
     return true;
 }
 
-void BridgeProtocol::_resync() {
-    if (_bufLen < 2) {
-        _bufLen = 0;
+void BridgeProtocol::_resync(Transport& transport) {
+    if (transport.bufLen < 2) {
+        transport.bufLen = 0;
         return;
     }
-    for (uint32_t i = 1; i < _bufLen - 1; i++) {
-        if (_buf[i] == PROTO_MAGIC_0 && _buf[i+1] == PROTO_MAGIC_1) {
-            memmove(_buf, _buf + i, _bufLen - i);
-            _bufLen -= i;
+    for (uint32_t i = 1; i < transport.bufLen - 1; i++) {
+        if (transport.buf[i] == PROTO_MAGIC_0 && transport.buf[i+1] == PROTO_MAGIC_1) {
+            memmove(transport.buf, transport.buf + i, transport.bufLen - i);
+            transport.bufLen -= i;
             return;
         }
     }
-    _bufLen = 0;  // nothing found, discard everything
+    transport.bufLen = 0;  // nothing found, discard everything
 }
 
 // ── _dispatch — route frame to correct callback ───────────────────────────────
-void BridgeProtocol::_dispatch(ProtoFrame& f) {
+void BridgeProtocol::_dispatch(ProtoFrame& f, Transport& transport) {
+    // The most recent valid frame selects the transport for responses and
+    // asynchronous events. The app only opens one physical port at a time.
+    for (uint8_t i = 0; i < _transportCount; ++i) {
+        if (&_transports[i] == &transport) {
+            _activeTransport = i;
+            break;
+        }
+    }
+
     if (f.type == TYPE_CMD && _onCmd) {
         JsonDocument* doc = new JsonDocument();
         if (!doc) return;  // OOM
@@ -118,6 +138,7 @@ void BridgeProtocol::sendResp(uint8_t id, bool ok, const char* msg) {
     JsonDocument doc;
     doc["ok"] = ok;
     if (msg) doc["msg"] = msg;
+    doc["transport"] = activeTransportName();
     String json;
     serializeJson(doc, json);
     sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -136,8 +157,13 @@ void BridgeProtocol::sendPcapChunk(uint8_t chunk_idx, const uint8_t* data, uint3
     sendRaw(TYPE_PCAP, chunk_idx, data, len);
 }
 
-// ── sendRaw — write a complete frame to the stream ───────────────────────────
+// ── sendRaw — write a complete frame to the active stream ────────────────────
 void BridgeProtocol::sendRaw(uint8_t type, uint8_t id, const uint8_t* payload, uint32_t len) {
+    if (_transportCount == 0) return;
+    if (_activeTransport >= _transportCount) _activeTransport = 0;
+    Stream* stream = _transports[_activeTransport].stream;
+    if (stream == nullptr) return;
+
     // AsyncWebServer callbacks and the main loop can emit frames concurrently.
     // Keep header+payload contiguous so PCAP/event frames cannot interleave.
     if (_txMutex) xSemaphoreTake(_txMutex, portMAX_DELAY);
@@ -148,10 +174,16 @@ void BridgeProtocol::sendRaw(uint8_t type, uint8_t id, const uint8_t* payload, u
     header[2] = type;
     header[3] = id;
     memcpy(header + 4, &len, 4);  // little-endian
-    _stream.write(header, PROTO_HEADER_SZ);
+    stream->write(header, PROTO_HEADER_SZ);
     if (len > 0 && payload) {
-        _stream.write(payload, len);
+        stream->write(payload, len);
     }
 
     if (_txMutex) xSemaphoreGive(_txMutex);
+}
+
+const char* BridgeProtocol::activeTransportName() const {
+    if (_transportCount == 0) return "unknown";
+    const uint8_t index = _activeTransport < _transportCount ? _activeTransport : 0;
+    return _transports[index].name;
 }

@@ -63,7 +63,21 @@
     #define CHIP_NAME "ESP32"
 #endif
 
-BridgeProtocol proto(Serial);
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || \
+    defined(CONFIG_IDF_TARGET_ESP32S3) || \
+    defined(CONFIG_IDF_TARGET_ESP32C3) || \
+    defined(CONFIG_IDF_TARGET_ESP32C5) || \
+    defined(CONFIG_IDF_TARGET_ESP32C6)
+    #define NRSUITE_HAS_NATIVE_USB 1
+#else
+    #define NRSUITE_HAS_NATIVE_USB 0
+#endif
+
+#if NRSUITE_HAS_NATIVE_USB
+BridgeProtocol proto(Serial, "usb_cdc");
+#else
+BridgeProtocol proto(Serial, "uart0");
+#endif
 Sniffer        sniffer;
 PortalManager  portal;
 BeaconSpammer  beacon;
@@ -1242,7 +1256,13 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── PING ──────────────────────────────────────────────────────────────
     if (strcmp(cmd, "PING") == 0) {
-        proto.sendResp(id, true, "pong");
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["msg"] = "pong";
+        resp["transport"] = proto.activeTransportName();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── WPS PIXIE DUST ────────────────────────────────────────────────────
@@ -1483,6 +1503,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["ok"]       = true;
         resp["uptime"]   = millis();
         resp["heap"]     = ESP.getFreeHeap();
+        resp["transport"] = proto.activeTransportName();
         resp["chip"]      = CHIP_NAME;
         resp["proto"]       = 1;
         resp["proto_minor"] = 1;
@@ -3563,13 +3584,14 @@ void sendHeartbeat() {
     // the JSON document path has been observed producing an empty object,
     // while the protocol frame itself remained valid. A fixed stack buffer
     // guarantees the monitor always receives a readable heartbeat payload.
-    char payload[96];
+    char payload[128];
     const int length = std::snprintf(
         payload,
         sizeof(payload),
-        "{\"uptime\":%lu,\"heap\":%lu,\"type\":\"heartbeat\"}",
+        "{\"uptime\":%lu,\"heap\":%lu,\"type\":\"heartbeat\",\"transport\":\"%s\"}",
         static_cast<unsigned long>(millis()),
-        static_cast<unsigned long>(ESP.getFreeHeap()));
+        static_cast<unsigned long>(ESP.getFreeHeap()),
+        proto.activeTransportName());
     if (length <= 0) return;
     const size_t payloadLength = std::min<size_t>(
         static_cast<size_t>(length),
@@ -3609,8 +3631,18 @@ void setup() {
         #endif
     #endif
 
+#if NRSUITE_HAS_NATIVE_USB
+    // Native USB CDC/JTAG is the primary protocol transport.
+    Serial.begin(115200);
+    // UART0 is the second protocol transport for devkits that expose a
+    // USB-to-UART bridge alongside the native USB port.
+    Serial0.setRxBufferSize(4096);
+    Serial0.begin(115200);
+    proto.addTransport(Serial0, "uart0");
+#else
     Serial.setRxBufferSize(4096);
     Serial.begin(115200);
+#endif
     delay(150);
 
     loadLd2450Config();

@@ -73,6 +73,32 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 **Recommended board for getting started:** ESP32-C3 DevKitM-1. It has native USB CDC (no external USB-UART chip), BLE, and is the default build target.
 
+### Protocol transport
+
+Native-USB-capable targets (C3, C5, S2, S3, and C6 when enabled) listen for
+the NRSuite protocol on **both** the native USB CDC/JTAG port and UART0. This
+allows one firmware image to work with devkits that expose separate `USB` and
+`UART` connectors.
+
+Classic ESP32 targets remain UART-only because they have no native USB
+peripheral.
+
+`PING`, `STATUS`, and heartbeat events include a `transport` field, for example:
+
+```json
+{ "ok": true, "msg": "pong", "transport": "usb_cdc" }
+```
+
+or:
+
+```json
+{ "ok": true, "msg": "pong", "transport": "uart0" }
+```
+
+The Android app should connect to only one physical port at a time. Commands are
+answered on the transport that sent them, and asynchronous events follow the most
+recent active transport.
+
 ---
 
 ## Features
@@ -342,7 +368,7 @@ Features are conditionally compiled based on the target board. Key flags set in 
 | `ENABLE_BLE_HID` | C3, S3, DevKit | Enables BLE keyboard and mouse HID |
 | `MSC_SUPPORTED` | S2, S3 | Enables USB mass storage |
 | `HID_SUPPORTED` | S2, S3 | Enables USB HID BadUSB |
-| `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3 | Native USB CDC without external UART |
+| `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3, C5 | Native USB CDC/JTAG support; native-capable builds also listen on UART0 |
 | `CONFIG_ESP_WIFI_ENABLE_SNIFFER` | All | Enables promiscuous mode for packet capture |
 | `WPS_PIXIE_SUPPORTED` | All | Enables the raw WPS Pixie Dust registrar flow and `wps_pixie` capability |
 
