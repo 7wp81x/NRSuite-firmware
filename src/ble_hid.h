@@ -15,6 +15,7 @@ namespace BleHid {
 
 // Lifecycle
 void begin(const String& deviceName);
+bool isInitialized();
 void end();
 bool isConnected();
 bool isBonded();

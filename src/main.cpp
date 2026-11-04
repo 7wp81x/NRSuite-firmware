@@ -2938,6 +2938,24 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         } else if (bleProfile.active()) {
             proto.sendResp(id, false, "stop BLE profile before starting BLE HID");
         } else {
+            // NimBLE + HID needs roughly 65-70 KB on C3-class targets. Starting
+            // with less has been observed to exhaust the heap and reset the
+            // USB device. Refuse before allocation instead of crashing.
+            constexpr uint32_t BLE_HID_MIN_FREE_HEAP = 90 * 1024;
+            const uint32_t freeHeap = ESP.getFreeHeap();
+            const uint32_t largestBlock = ESP.getMaxAllocHeap();
+            if (!BleHid::isInitialized() &&
+                (freeHeap < BLE_HID_MIN_FREE_HEAP || largestBlock < 48 * 1024)) {
+                char message[96];
+                snprintf(
+                    message,
+                    sizeof(message),
+                    "insufficient heap for BLE HID (free=%lu largest=%lu)",
+                    static_cast<unsigned long>(freeHeap),
+                    static_cast<unsigned long>(largestBlock));
+                proto.sendResp(id, false, message);
+                return;
+            }
             radioIdle();
             const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
             BleHid::begin(String(name));
@@ -3585,12 +3603,19 @@ void handleAck(uint32_t chunk_index) {
     sniffer.onAck(chunk_index);
 }
 
+static bool shouldLogMemoryCommand(const char* cmd) {
+    if (!cmd || cmd[0] == '\0') return false;
+    return strcmp(cmd, "SCAN_WIFI") == 0 ||
+           strcmp(cmd, "DEAUTH") == 0 ||
+           strcmp(cmd, "DEAUTH_BURST") == 0 ||
+           strcmp(cmd, "WPS_PIXIE_ATTEMPT") == 0 ||
+           strstr(cmd, "START") != nullptr ||
+           strstr(cmd, "STOP") != nullptr;
+}
+
 static void handleCmdWithMemoryLog(uint8_t id, JsonDocument& doc) {
     const char* cmd = doc["cmd"] | "";
-    const bool noisy = strcmp(cmd, "PING") == 0 ||
-                       strcmp(cmd, "STATUS") == 0 ||
-                       strcmp(cmd, "HEAP") == 0;
-    if (noisy) {
+    if (!shouldLogMemoryCommand(cmd)) {
         handleCmdImpl(id, doc);
         return;
     }

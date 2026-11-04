@@ -28,6 +28,10 @@ void begin(const String& deviceName) {
     advertising = true;
 }
 
+bool isInitialized() {
+    return keyboard != nullptr;
+}
+
 void end() {
     if (!keyboard) return;
     keyboard->releaseAll();
