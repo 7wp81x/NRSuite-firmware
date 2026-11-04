@@ -99,6 +99,15 @@ The Android app should connect to only one physical port at a time. Commands are
 answered on the transport that sent them, and asynchronous events follow the most
 recent active transport.
 
+`STATUS` also exposes device telemetry used by the Android Device specs screen:
+
+```text
+heap, heap_total, heap_used, heap_min_free, heap_max_alloc,
+psram_total, psram_free, chip_cores, cpu_mhz, flash_size, sdk
+```
+
+`psram_total` and `psram_free` are zero when the target has no PSRAM.
+
 ---
 
 ## Features

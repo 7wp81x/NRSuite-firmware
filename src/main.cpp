@@ -1503,6 +1503,16 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["ok"]       = true;
         resp["uptime"]   = millis();
         resp["heap"]     = ESP.getFreeHeap();
+        resp["heap_total"]     = ESP.getHeapSize();
+        resp["heap_used"]      = ESP.getHeapSize() - ESP.getFreeHeap();
+        resp["heap_min_free"]  = ESP.getMinFreeHeap();
+        resp["heap_max_alloc"] = ESP.getMaxAllocHeap();
+        resp["psram_total"]    = ESP.getPsramSize();
+        resp["psram_free"]     = ESP.getFreePsram();
+        resp["chip_cores"]     = ESP.getChipCores();
+        resp["cpu_mhz"]        = ESP.getCpuFreqMHz();
+        resp["flash_size"]     = ESP.getFlashChipSize();
+        resp["sdk"]            = ESP.getSdkVersion();
         resp["transport"] = proto.activeTransportName();
         resp["chip"]      = CHIP_NAME;
         resp["proto"]       = 1;
