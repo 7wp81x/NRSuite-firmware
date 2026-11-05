@@ -41,6 +41,7 @@ inline void wpsScanCopyText(char* destination, size_t capacity, const char* sour
 }
 
 inline void wpsScanMergeMetadata(WpsScanRecord& target, const WpsScanRecord& source) {
+    target.wps = target.wps || source.wps;
     if (source.wpsParsed) {
         target.wpsParsed = true;
         if (target.wpsVersion == 0) target.wpsVersion = source.wpsVersion;

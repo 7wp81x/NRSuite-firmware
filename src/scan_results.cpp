@@ -88,7 +88,7 @@ size_t ScanResultStore::appendResults(
         formatBssid(record.bssid, bssid);
 
         JsonObject item = out.add<JsonObject>();
-        item["type"] = kind_ == Kind::Wps ? "wps_lock_ap" : "scan_ap";
+        item["type"] = (kind_ == Kind::Wps && record.wps) ? "wps_lock_ap" : "scan_ap";
         item["ssid"] = record.ssid;
         item["bssid"] = bssid;
         item["channel"] = record.channel;

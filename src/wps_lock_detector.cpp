@@ -147,7 +147,7 @@ void WpsLockDetector::upsert(const ApRecord& record) {
     );
 }
 
-void WpsLockDetector::discoverActiveWpsCandidates(bool include5ghz) {
+void WpsLockDetector::discoverActiveWpsCandidates(bool include5ghz, bool includeNonWps) {
     wifi_scan_config_t scanConfig = {};
     scanConfig.show_hidden = true;
     scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
@@ -173,12 +173,12 @@ void WpsLockDetector::discoverActiveWpsCandidates(bool include5ghz) {
             uint16_t fetched = apCount;
             if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
                 for (uint16_t index = 0; index < fetched; ++index) {
-                    if (!records[index].wps) continue;
+                    if (!includeNonWps && !records[index].wps) continue;
                     if (!include5ghz && records[index].primary >= 36) continue;
 
                     ApRecord candidate;
                     candidate.activeScan = true;
-                    candidate.wps = true;
+                    candidate.wps = records[index].wps;
                     candidate.channel = records[index].primary;
                     candidate.rssi = records[index].rssi;
                     candidate.lastSeenMs = millis();
@@ -199,7 +199,12 @@ void WpsLockDetector::discoverActiveWpsCandidates(bool include5ghz) {
     esp_wifi_scan_stop();
 }
 
-int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
+int WpsLockDetector::scan(
+    bool include5ghz,
+    uint16_t dwellMs,
+    bool emitEvents,
+    bool includeNonWps
+) {
     recordCount_ = 0;
     memset(records_, 0, sizeof(records_));
     if (dwellMs < 60) dwellMs = 60;
@@ -208,7 +213,7 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
     // Active discovery first: this is the same discovery capability used by
     // SCAN_WIFI and is authoritative for the candidate set and radio fields.
     // The passive pass below only enriches WPS IE metadata.
-    discoverActiveWpsCandidates(include5ghz);
+    discoverActiveWpsCandidates(include5ghz, includeNonWps);
 
     wifi_promiscuous_filter_t filter = {};
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
@@ -247,21 +252,25 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
         );
 
         JsonDocument event;
-        event["type"] = "wps_lock_ap";
         event["ssid"] = record.ssid;
         event["bssid"] = bssid;
         event["channel"] = record.channel;
         event["rssi"] = record.rssi;
         event["security"] = record.security;
-        event["wps"] = true;
-        event["wps_parsed"] = record.wpsParsed;
-        event["lock_reported"] = record.lockReported;
-        event["ap_setup_locked"] = record.apSetupLocked;
-        event["wps_version"] = record.wpsVersion;
-        event["config_methods"] = record.configMethods;
-        event["selected_registrar"] = record.selectedRegistrar;
-        event["last_seen_ms"] = record.lastSeenMs;
-        proto_->sendEvent("wps_lock_ap", event);
+        event["wps"] = record.wps;
+        if (record.wps) {
+            event["wps_parsed"] = record.wpsParsed;
+            event["lock_reported"] = record.lockReported;
+            event["ap_setup_locked"] = record.apSetupLocked;
+            event["wps_version"] = record.wpsVersion;
+            event["config_methods"] = record.configMethods;
+            event["selected_registrar"] = record.selectedRegistrar;
+            event["last_seen_ms"] = record.lastSeenMs;
+            proto_->sendEvent("wps_lock_ap", event);
+        } else {
+            event["band"] = record.channel >= 36 ? "5g" : "2g";
+            proto_->sendEvent("scan_ap", event);
+        }
         // Match the scan-event pacing used by SCAN_WIFI. WPS AP events are
         // larger, so sending several back-to-back can overrun UART bridges.
         proto_->flushActive();
@@ -281,7 +290,7 @@ void WpsLockDetector::appendResults(ScanResultStore& store) const {
         record.rssi = source.rssi;
         strncpy(record.security, source.security, sizeof(record.security) - 1);
         record.security[sizeof(record.security) - 1] = '\0';
-        record.wps = true;
+        record.wps = source.wps;
         record.band = source.channel >= 36 ? 1 : 0;
         record.wpsParsed = source.wpsParsed;
         record.lockReported = source.lockReported;

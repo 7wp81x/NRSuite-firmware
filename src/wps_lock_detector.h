@@ -9,7 +9,12 @@
 class WpsLockDetector {
 public:
     void begin(BridgeProtocol& proto);
-    int scan(bool include5ghz, uint16_t dwellMs, bool emitEvents = true);
+    int scan(
+        bool include5ghz,
+        uint16_t dwellMs,
+        bool emitEvents = true,
+        bool includeNonWps = false
+    );
     size_t resultCount() const { return recordCount_; }
     void appendResults(ScanResultStore& store) const;
 
@@ -25,6 +30,6 @@ private:
     uint8_t currentChannel_ = 0;
 
     void handlePacket(const wifi_promiscuous_pkt_t* pkt);
-    void discoverActiveWpsCandidates(bool include5ghz);
+    void discoverActiveWpsCandidates(bool include5ghz, bool includeNonWps);
     void upsert(const ApRecord& record);
 };

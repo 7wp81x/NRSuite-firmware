@@ -17,6 +17,12 @@ WpsScanRecord activeCandidate(uint8_t bssidLast, const char* ssid, int8_t rssi) 
     return record;
 }
 
+WpsScanRecord activeNonWpsCandidate(uint8_t bssidLast, const char* ssid, int8_t rssi) {
+    WpsScanRecord record = activeCandidate(bssidLast, ssid, rssi);
+    record.wps = false;
+    return record;
+}
+
 WpsScanRecord passiveCandidate(uint8_t bssidLast, int8_t rssi, bool parsed, bool locked) {
     WpsScanRecord record;
     record.activeScan = false;
@@ -78,6 +84,21 @@ void test_active_discovery_fields_win_over_passive_rssi_and_security() {
     TEST_ASSERT_TRUE(records[0].wpsParsed);
 }
 
+void test_passive_wps_evidence_promotes_active_non_wps_candidate() {
+    WpsScanRecord records[4] = {};
+    size_t count = 0;
+    wpsScanMergeRecord(records, count, 4, activeNonWpsCandidate(0x30, "Late WPS", -64));
+    TEST_ASSERT_FALSE(records[0].wps);
+
+    WpsScanRecord passive = passiveCandidate(0x30, -85, true, false);
+    wpsScanMergeRecord(records, count, 4, passive);
+
+    TEST_ASSERT_EQUAL_UINT32(1, count);
+    TEST_ASSERT_TRUE(records[0].wps);
+    TEST_ASSERT_TRUE(records[0].wpsParsed);
+    TEST_ASSERT_EQUAL(-64, records[0].rssi);
+}
+
 void test_passive_only_wps_candidate_is_retained() {
     WpsScanRecord records[4] = {};
     size_t count = 0;
@@ -99,6 +120,7 @@ int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_active_wps_candidates_survive_when_passive_pass_misses_them);
     RUN_TEST(test_active_discovery_fields_win_over_passive_rssi_and_security);
+    RUN_TEST(test_passive_wps_evidence_promotes_active_non_wps_candidate);
     RUN_TEST(test_passive_only_wps_candidate_is_retained);
     return UNITY_END();
 }

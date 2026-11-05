@@ -1372,6 +1372,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         uint16_t dwellMs = doc["args"]["dwell_ms"] | 120;
         dwellMs = (uint16_t)constrain(dwellMs, 60, 1000);
         const bool pullResults = doc["args"]["pull_results"] | false;
+        const bool includeNonWps = doc["args"]["include_non_wps"] | false;
         uint32_t scanId = 0;
         if (pullResults) {
             scanId = g_nextScanId++;
@@ -1381,7 +1382,8 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         const int scannedCount = wpsLockDetector.scan(
             bandMode != WifiBandMode::BAND_2G,
             dwellMs,
-            !pullResults
+            !pullResults,
+            includeNonWps
         );
         int reportedCount = scannedCount;
         if (pullResults) {
@@ -1395,6 +1397,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         if (pullResults) {
             resp["scan_id"] = scanId;
             resp["kind"] = "wps";
+            resp["include_non_wps"] = includeNonWps;
             resp["truncated"] = scannedCount > reportedCount;
         }
         String json;
