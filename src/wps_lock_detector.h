@@ -4,6 +4,7 @@
 #include <esp_wifi.h>
 #include "BridgeProtocol.h"
 #include "scan_results.h"
+#include "wps_scan_merge.h"
 
 class WpsLockDetector {
 public:
@@ -13,21 +14,7 @@ public:
     void appendResults(ScanResultStore& store) const;
 
 private:
-    struct ApRecord {
-        bool used = false;
-        char ssid[33] = {};
-        uint8_t bssid[6] = {};
-        uint8_t channel = 0;
-        int8_t rssi = -127;
-        char security[12] = "OPEN";
-        bool wpsParsed = false;
-        bool lockReported = false;
-        bool locked = false;
-        uint8_t wpsVersion = 0;
-        uint16_t configMethods = 0;
-        bool selectedRegistrar = false;
-        uint32_t lastSeenMs = 0;
-    };
+    using ApRecord = WpsScanRecord;
 
     static WpsLockDetector* instance_;
     static void promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type);
@@ -38,5 +25,6 @@ private:
     uint8_t currentChannel_ = 0;
 
     void handlePacket(const wifi_promiscuous_pkt_t* pkt);
+    void discoverActiveWpsCandidates(bool include5ghz);
     void upsert(const ApRecord& record);
 };

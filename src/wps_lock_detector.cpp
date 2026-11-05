@@ -12,6 +12,21 @@ constexpr uint8_t WIFI_5G_CHANNELS[] = {
 };
 }
 
+static const char* authModeStr(wifi_auth_mode_t mode) {
+    switch (mode) {
+        case WIFI_AUTH_OPEN:            return "OPEN";
+        case WIFI_AUTH_WEP:             return "WEP";
+        case WIFI_AUTH_WPA_PSK:         return "WPA-PSK";
+        case WIFI_AUTH_WPA2_PSK:        return "WPA2-PSK";
+        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2-PSK";
+        case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-ENTERPRISE";
+        case WIFI_AUTH_WPA3_PSK:        return "WPA3-PSK";
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3-PSK";
+        case WIFI_AUTH_WAPI_PSK:        return "WAPI-PSK";
+        default:                        return "UNKNOWN";
+    }
+}
+
 WpsLockDetector* WpsLockDetector::instance_ = nullptr;
 
 void WpsLockDetector::begin(BridgeProtocol& proto) {
@@ -96,7 +111,7 @@ void WpsLockDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
                         attributes.find(wps::ATTR_AP_SETUP_LOCKED);
                     if (locked != nullptr && locked->length >= 1) {
                         record.lockReported = true;
-                        record.locked = locked->value[0] != 0;
+                        record.apSetupLocked = locked->value[0] != 0;
                     }
                 }
             }
@@ -118,40 +133,70 @@ void WpsLockDetector::handlePacket(const wifi_promiscuous_pkt_t* pkt) {
 
     // The lock detector only reports WPS-enabled APs.
     if (!hasWps) return;
+    record.wps = true;
+    record.activeScan = false;
     upsert(record);
 }
 
 void WpsLockDetector::upsert(const ApRecord& record) {
-    for (size_t index = 0; index < recordCount_; ++index) {
-        if (memcmp(records_[index].bssid, record.bssid, 6) == 0) {
-            ApRecord merged = record;
-            ApRecord& existing = records_[index];
-            // Some APs emit frames without an SSID element even when the SSID is
-            // visible in normal scans. Preserve the best SSID observed during
-            // this scan instead of overwriting a known SSID with an empty one.
-            if (merged.ssid[0] == '\0' && existing.ssid[0] != '\0') {
-                memcpy(merged.ssid, existing.ssid, sizeof(merged.ssid));
+    wpsScanMergeRecord(
+        records_,
+        recordCount_,
+        sizeof(records_) / sizeof(records_[0]),
+        record
+    );
+}
+
+void WpsLockDetector::discoverActiveWpsCandidates(bool include5ghz) {
+    wifi_scan_config_t scanConfig = {};
+    scanConfig.show_hidden = true;
+    scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    scanConfig.scan_time.active.min = 100;
+#if defined(CONFIG_IDF_TARGET_ESP32)
+    // Match the classic ESP32 SCAN_WIFI default: short active scans are
+    // noticeably less reliable on this target.
+    scanConfig.scan_time.active.max = 500;
+#else
+    scanConfig.scan_time.active.max = 300;
+#endif
+
+    if (esp_wifi_scan_start(&scanConfig, true) != ESP_OK) {
+        return;
+    }
+
+    uint16_t apCount = 0;
+    if (esp_wifi_scan_get_ap_num(&apCount) == ESP_OK && apCount > 0) {
+        wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
+            apCount * sizeof(wifi_ap_record_t)
+        );
+        if (records != nullptr) {
+            uint16_t fetched = apCount;
+            if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
+                for (uint16_t index = 0; index < fetched; ++index) {
+                    if (!records[index].wps) continue;
+                    if (!include5ghz && records[index].primary >= 36) continue;
+
+                    ApRecord candidate;
+                    candidate.activeScan = true;
+                    candidate.wps = true;
+                    candidate.channel = records[index].primary;
+                    candidate.rssi = records[index].rssi;
+                    candidate.lastSeenMs = millis();
+                    memcpy(candidate.ssid, records[index].ssid, sizeof(candidate.ssid));
+                    candidate.ssid[sizeof(candidate.ssid) - 1] = '\0';
+                    memcpy(candidate.bssid, records[index].bssid, sizeof(candidate.bssid));
+                    wpsScanCopyText(
+                        candidate.security,
+                        sizeof(candidate.security),
+                        authModeStr(records[index].authmode)
+                    );
+                    upsert(candidate);
+                }
             }
-            // WPS attributes can appear in only one of beacon/probe-response
-            // frames. Keep previously observed metadata when a later frame is
-            // less complete.
-            if (!merged.wpsParsed && existing.wpsParsed) {
-                merged.wpsParsed = true;
-                merged.wpsVersion = existing.wpsVersion;
-                merged.configMethods = existing.configMethods;
-                merged.selectedRegistrar = existing.selectedRegistrar;
-            }
-            if (!merged.lockReported && existing.lockReported) {
-                merged.lockReported = true;
-                merged.locked = existing.locked;
-            }
-            existing = merged;
-            return;
+            free(records);
         }
     }
-    if (recordCount_ < sizeof(records_) / sizeof(records_[0])) {
-        records_[recordCount_++] = record;
-    }
+    esp_wifi_scan_stop();
 }
 
 int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
@@ -159,6 +204,11 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
     memset(records_, 0, sizeof(records_));
     if (dwellMs < 60) dwellMs = 60;
     if (dwellMs > 1000) dwellMs = 1000;
+
+    // Active discovery first: this is the same discovery capability used by
+    // SCAN_WIFI and is authoritative for the candidate set and radio fields.
+    // The passive pass below only enriches WPS IE metadata.
+    discoverActiveWpsCandidates(include5ghz);
 
     wifi_promiscuous_filter_t filter = {};
     filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
@@ -183,46 +233,6 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
     esp_wifi_set_promiscuous_rx_cb(nullptr);
     currentChannel_ = 0;
 
-    // Resolve SSIDs with a normal active scan. This does not perform a WPS
-    // exchange; it only fills in SSIDs for APs whose beacon/probe response was
-    // captured without an SSID element.
-    wifi_scan_config_t scanConfig = {};
-    scanConfig.show_hidden = true;
-    scanConfig.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    scanConfig.scan_time.active.min = 100;
-    scanConfig.scan_time.active.max = 300;
-    if (esp_wifi_scan_start(&scanConfig, true) == ESP_OK) {
-        uint16_t apCount = 0;
-        if (esp_wifi_scan_get_ap_num(&apCount) == ESP_OK && apCount > 0) {
-            wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
-                apCount * sizeof(wifi_ap_record_t)
-            );
-            if (records != nullptr) {
-                uint16_t fetched = apCount;
-                if (esp_wifi_scan_get_ap_records(&fetched, records) == ESP_OK) {
-                    for (size_t index = 0; index < recordCount_; ++index) {
-                        for (uint16_t ap = 0; ap < fetched; ++ap) {
-                            if (memcmp(records_[index].bssid, records[ap].bssid, 6) != 0) {
-                                continue;
-                            }
-                            if (records[ap].ssid[0] != '\0') {
-                                strncpy(
-                                    records_[index].ssid,
-                                    (const char*)records[ap].ssid,
-                                    sizeof(records_[index].ssid) - 1
-                                );
-                                records_[index].ssid[sizeof(records_[index].ssid) - 1] = '\0';
-                            }
-                            break;
-                        }
-                    }
-                }
-                free(records);
-            }
-        }
-        esp_wifi_scan_stop();
-    }
-
     if (proto_ == nullptr || !emitEvents) return (int)recordCount_;
     int emitted = 0;
     for (size_t index = 0; index < recordCount_; ++index) {
@@ -246,7 +256,7 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
         event["wps"] = true;
         event["wps_parsed"] = record.wpsParsed;
         event["lock_reported"] = record.lockReported;
-        event["ap_setup_locked"] = record.locked;
+        event["ap_setup_locked"] = record.apSetupLocked;
         event["wps_version"] = record.wpsVersion;
         event["config_methods"] = record.configMethods;
         event["selected_registrar"] = record.selectedRegistrar;
@@ -275,7 +285,7 @@ void WpsLockDetector::appendResults(ScanResultStore& store) const {
         record.band = source.channel >= 36 ? 1 : 0;
         record.wpsParsed = source.wpsParsed;
         record.lockReported = source.lockReported;
-        record.apSetupLocked = source.locked;
+        record.apSetupLocked = source.apSetupLocked;
         record.wpsVersion = source.wpsVersion;
         record.configMethods = source.configMethods;
         record.selectedRegistrar = source.selectedRegistrar;
