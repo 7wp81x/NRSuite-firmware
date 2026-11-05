@@ -2056,6 +2056,12 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
                     ev["wps"]      = (bool)records[i].wps;
                     ev["band"]     = wifiBandForChannel(records[i].primary);
                     proto.sendEvent("scan_ap", ev);
+                    // Scan bursts can contain many AP frames back-to-back. On
+                    // UART bridges a full TX queue was observed to corrupt or
+                    // drop event frames, so drain each frame before queueing
+                    // the next one.
+                    proto.flushActive();
+                    delay(2);
                     emittedCount++;
                 }
             } else {
