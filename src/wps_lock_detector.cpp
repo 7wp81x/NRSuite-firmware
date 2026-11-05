@@ -252,6 +252,10 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs) {
         event["selected_registrar"] = record.selectedRegistrar;
         event["last_seen_ms"] = record.lastSeenMs;
         proto_->sendEvent("wps_lock_ap", event);
+        // Match the scan-event pacing used by SCAN_WIFI. WPS AP events are
+        // larger, so sending several back-to-back can overrun UART bridges.
+        proto_->flushActive();
+        delay(2);
         emitted++;
     }
     return emitted;
