@@ -3,11 +3,14 @@
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include "BridgeProtocol.h"
+#include "scan_results.h"
 
 class WpsLockDetector {
 public:
     void begin(BridgeProtocol& proto);
-    int scan(bool include5ghz, uint16_t dwellMs);
+    int scan(bool include5ghz, uint16_t dwellMs, bool emitEvents = true);
+    size_t resultCount() const { return recordCount_; }
+    void appendResults(ScanResultStore& store) const;
 
 private:
     struct ApRecord {

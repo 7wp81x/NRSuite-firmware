@@ -19,6 +19,7 @@
 #include "wps_pixie.h"
 #include "wps_lock_detector.h"
 #include "wps_attempt_detector.h"
+#include "scan_results.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
@@ -91,6 +92,8 @@ Pn532Nfc       pn532Nfc;
 WpsPixieManager wpsPixie;
 WpsLockDetector wpsLockDetector;
 WpsAttemptDetector wpsAttemptDetector;
+ScanResultStore scanResults;
+static uint32_t g_nextScanId = 1;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -1368,14 +1371,32 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         }
         uint16_t dwellMs = doc["args"]["dwell_ms"] | 120;
         dwellMs = (uint16_t)constrain(dwellMs, 60, 1000);
+        const bool pullResults = doc["args"]["pull_results"] | false;
+        uint32_t scanId = 0;
+        if (pullResults) {
+            scanId = g_nextScanId++;
+            scanResults.begin(ScanResultStore::Kind::Wps, scanId);
+        }
         radioIdle();
-        const int count = wpsLockDetector.scan(
+        const int scannedCount = wpsLockDetector.scan(
             bandMode != WifiBandMode::BAND_2G,
-            dwellMs
+            dwellMs,
+            !pullResults
         );
+        int reportedCount = scannedCount;
+        if (pullResults) {
+            wpsLockDetector.appendResults(scanResults);
+            reportedCount = (int)scanResults.count();
+        }
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = count;
+        resp["count"] = reportedCount;
+        resp["scanned"] = scannedCount;
+        if (pullResults) {
+            resp["scan_id"] = scanId;
+            resp["kind"] = "wps";
+            resp["truncated"] = scannedCount > reportedCount;
+        }
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1529,7 +1550,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         resp["transport"] = proto.activeTransportName();
         resp["chip"]      = CHIP_NAME;
         resp["proto"]       = 1;
-        resp["proto_minor"] = 1;
+        resp["proto_minor"] = 2;
         resp["fw"]          = FW_VERSION;
         resp["device_id"] = getDeviceId();
         char countryCode[4] = {0};
@@ -1558,6 +1579,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         features.add("html_diag");
         features.add("stop_all");
         features.add("wps");
+        features.add("scan_results_pull");
         features.add("wps_lock_detect");
         features.add("wps_attempt_detect");
         #if WPS_PIXIE_SUPPORTED
@@ -2018,7 +2040,15 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             return;
         }
 
+        const bool pullResults = doc["args"]["pull_results"] | false;
+        uint32_t scanId = 0;
+        if (pullResults) {
+            scanId = g_nextScanId++;
+            scanResults.begin(ScanResultStore::Kind::Wifi, scanId);
+        }
+
         int emittedCount = 0;
+        int storedCount = 0;
         if (n > 0) {
             uint16_t count = (uint16_t)n;
             wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
@@ -2047,22 +2077,40 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
                              records[i].bssid[2], records[i].bssid[3],
                              records[i].bssid[4], records[i].bssid[5]);
 
-                    JsonDocument ev;
-                    ev["ssid"]     = (char*)records[i].ssid;
-                    ev["bssid"]    = bssid_str;
-                    ev["channel"]  = records[i].primary;
-                    ev["rssi"]     = records[i].rssi;
-                    ev["security"] = authModeStr(records[i].authmode);
-                    ev["wps"]      = (bool)records[i].wps;
-                    ev["band"]     = wifiBandForChannel(records[i].primary);
-                    proto.sendEvent("scan_ap", ev);
-                    // Scan bursts can contain many AP frames back-to-back. On
-                    // UART bridges a full TX queue was observed to corrupt or
-                    // drop event frames, so drain each frame before queueing
-                    // the next one.
-                    proto.flushActive();
-                    delay(2);
-                    emittedCount++;
+                    if (pullResults) {
+                        ScanResultStore::Record result;
+                        memcpy(result.ssid, records[i].ssid, sizeof(result.ssid));
+                        result.ssid[sizeof(result.ssid) - 1] = '\0';
+                        memcpy(result.bssid, records[i].bssid, sizeof(result.bssid));
+                        result.channel = records[i].primary;
+                        result.rssi = records[i].rssi;
+                        strncpy(
+                            result.security,
+                            authModeStr(records[i].authmode),
+                            sizeof(result.security) - 1
+                        );
+                        result.security[sizeof(result.security) - 1] = '\0';
+                        result.wps = (bool)records[i].wps;
+                        result.band = records[i].primary >= 36 ? 1 : 0;
+                        if (scanResults.add(result)) storedCount++;
+                    } else {
+                        JsonDocument ev;
+                        ev["ssid"]     = (char*)records[i].ssid;
+                        ev["bssid"]    = bssid_str;
+                        ev["channel"]  = records[i].primary;
+                        ev["rssi"]     = records[i].rssi;
+                        ev["security"] = authModeStr(records[i].authmode);
+                        ev["wps"]      = (bool)records[i].wps;
+                        ev["band"]     = wifiBandForChannel(records[i].primary);
+                        proto.sendEvent("scan_ap", ev);
+                        // Scan bursts can contain many AP frames back-to-back. On
+                        // UART bridges a full TX queue was observed to corrupt or
+                        // drop event frames, so drain each frame before queueing
+                        // the next one.
+                        proto.flushActive();
+                        delay(2);
+                        emittedCount++;
+                    }
                 }
             } else {
                 NRSUITE_DEBUG_PRINTF(
@@ -2076,19 +2124,26 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         }
 
         finishWifiScan(true);
+        const int reportedCount = pullResults ? storedCount : emittedCount;
         NRSUITE_DEBUG_PRINTF(
-            "SCAN_WIFI: response raw_count=%d emitted_count=%d band=%s\n",
+            "SCAN_WIFI: response raw_count=%d reported_count=%d pull=%s band=%s\n",
             n,
-            emittedCount,
+            reportedCount,
+            pullResults ? "yes" : "no",
             wifiBandModeName(bandMode)
         );
 
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = emittedCount;
+        resp["count"] = reportedCount;
         resp["scanned"] = n;
         resp["band"] = wifiBandModeName(bandMode);
         resp["dwell_ms"] = dwellMs;
+        if (pullResults) {
+            resp["scan_id"] = scanId;
+            resp["kind"] = "wifi";
+            resp["truncated"] = n > reportedCount;
+        }
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 
@@ -2097,6 +2152,51 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             if (wasHopping) sniffer.startHop(300);
             else sniffer.startFixed(prevChannel, isWifi5GhzEnabled());
         }
+    }
+
+    // ── SCAN_RESULTS ──────────────────────────────────────────────────────
+    // Pull-based retrieval for SCAN_WIFI/WPS_LOCK_SCAN snapshots. Each chunk
+    // is small, offset-addressed, and carries a CRC over the deterministic
+    // canonical result fields so the app can retry corrupt/missing chunks.
+    else if (strcmp(cmd, "SCAN_RESULTS") == 0) {
+        const uint32_t scanId = doc["args"]["scan_id"] | 0;
+        const size_t offset = doc["args"]["offset"] | 0;
+        uint16_t limit = doc["args"]["limit"] | ScanResultStore::kDefaultChunkLimit;
+        if (limit == 0) limit = ScanResultStore::kDefaultChunkLimit;
+        if (limit > ScanResultStore::kMaxChunkLimit) {
+            limit = ScanResultStore::kMaxChunkLimit;
+        }
+
+        if (scanId == 0 || !scanResults.matches(scanId)) {
+            proto.sendResp(id, false, "scan result snapshot not found");
+            return;
+        }
+        if (offset > scanResults.count()) {
+            proto.sendResp(id, false, "scan result offset out of range");
+            return;
+        }
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["scan_id"] = scanId;
+        resp["kind"] = scanResults.kindName();
+        resp["offset"] = (uint32_t)offset;
+        resp["limit"] = limit;
+        resp["total"] = (uint32_t)scanResults.count();
+        resp["crc32"] = scanResults.crc32ForRange(offset, limit);
+        JsonArray results = resp["results"].to<JsonArray>();
+        size_t nextOffset = offset;
+        const size_t chunkCount = scanResults.appendResults(
+            results,
+            offset,
+            limit,
+            nextOffset
+        );
+        resp["count"] = (uint32_t)chunkCount;
+        resp["next_offset"] = (uint32_t)nextOffset;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── DEAUTH_MULTI ─────────────────────────────────────────────────────

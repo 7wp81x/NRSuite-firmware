@@ -154,7 +154,7 @@ void WpsLockDetector::upsert(const ApRecord& record) {
     }
 }
 
-int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs) {
+int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs, bool emitEvents) {
     recordCount_ = 0;
     memset(records_, 0, sizeof(records_));
     if (dwellMs < 60) dwellMs = 60;
@@ -223,7 +223,7 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs) {
         esp_wifi_scan_stop();
     }
 
-    if (proto_ == nullptr) return 0;
+    if (proto_ == nullptr || !emitEvents) return (int)recordCount_;
     int emitted = 0;
     for (size_t index = 0; index < recordCount_; ++index) {
         const ApRecord& record = records_[index];
@@ -259,4 +259,27 @@ int WpsLockDetector::scan(bool include5ghz, uint16_t dwellMs) {
         emitted++;
     }
     return emitted;
+}
+
+void WpsLockDetector::appendResults(ScanResultStore& store) const {
+    for (size_t index = 0; index < recordCount_; ++index) {
+        const ApRecord& source = records_[index];
+        ScanResultStore::Record record;
+        memcpy(record.ssid, source.ssid, sizeof(record.ssid));
+        memcpy(record.bssid, source.bssid, sizeof(record.bssid));
+        record.channel = source.channel;
+        record.rssi = source.rssi;
+        strncpy(record.security, source.security, sizeof(record.security) - 1);
+        record.security[sizeof(record.security) - 1] = '\0';
+        record.wps = true;
+        record.band = source.channel >= 36 ? 1 : 0;
+        record.wpsParsed = source.wpsParsed;
+        record.lockReported = source.lockReported;
+        record.apSetupLocked = source.locked;
+        record.wpsVersion = source.wpsVersion;
+        record.configMethods = source.configMethods;
+        record.selectedRegistrar = source.selectedRegistrar;
+        record.lastSeenMs = source.lastSeenMs;
+        store.add(record);
+    }
 }
