@@ -1,8 +1,10 @@
 #include <Arduino.h>
 #include "NrDebugLog.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ArduinoJson.h>
+#include <soc/soc_caps.h>
 #include <esp_wifi.h>
 #include "BridgeProtocol.h"
 #include "sniffer.h"
@@ -37,6 +39,12 @@
 #include "ble_scanner.h"
 #include "ble_profile.h"
 #include "ble_pin_bruteforce.h"
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32)
+extern "C" uint8_t temprature_sens_read();
+#elif defined(SOC_TEMP_SENSOR_SUPPORTED)
+#include "driver/temperature_sensor.h"
 #endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -119,6 +127,57 @@ static String getDeviceId() {
     if (cached.isEmpty()) cached = "NR00000000";
     return cached;
 }
+
+// ── Internal chip temperature ────────────────────────────────────────────────
+#if defined(CONFIG_IDF_TARGET_ESP32)
+static bool readChipTemperatureC(float& outCelsius) {
+    // Classic ESP32 has an internal sensor but the current Arduino/IDF target
+    // does not link the official temperature-sensor driver. This ROM-backed
+    // value is best-effort only.
+    const float celsius = (temprature_sens_read() - 32.0f) / 1.8f;
+    if (!std::isfinite(celsius) || celsius < -40.0f || celsius > 125.0f) {
+        return false;
+    }
+    outCelsius = celsius;
+    return true;
+}
+#elif defined(SOC_TEMP_SENSOR_SUPPORTED)
+static temperature_sensor_handle_t gTempSensor = nullptr;
+static bool gTempSensorInitAttempted = false;
+
+static bool readChipTemperatureC(float& outCelsius) {
+    if (!gTempSensorInitAttempted) {
+        gTempSensorInitAttempted = true;
+        temperature_sensor_config_t config =
+            TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        esp_err_t err = temperature_sensor_install(&config, &gTempSensor);
+        if (err != ESP_OK) {
+            // Fall back to the range used by Arduino's temperatureRead().
+            config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
+            err = temperature_sensor_install(&config, &gTempSensor);
+        }
+        if (err == ESP_OK && temperature_sensor_enable(gTempSensor) != ESP_OK) {
+            temperature_sensor_uninstall(gTempSensor);
+            gTempSensor = nullptr;
+        }
+    }
+    if (gTempSensor == nullptr) return false;
+
+    float celsius = NAN;
+    if (temperature_sensor_get_celsius(gTempSensor, &celsius) != ESP_OK) {
+        return false;
+    }
+    if (!std::isfinite(celsius) || celsius < -40.0f || celsius > 125.0f) {
+        return false;
+    }
+    outCelsius = celsius;
+    return true;
+}
+#else
+static bool readChipTemperatureC(float&) {
+    return false;
+}
+#endif
 
 // ── IDF-level scan ───────────────────────────────────────────────────────────
 static uint16_t g_lastHtmlSeq = 0xFFFF;
@@ -1565,6 +1624,10 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         resp["cpu_mhz"]        = ESP.getCpuFreqMHz();
         resp["flash_size"]     = ESP.getFlashChipSize();
         resp["sdk"]            = ESP.getSdkVersion();
+        float chipTempC = 0.0f;
+        if (readChipTemperatureC(chipTempC)) {
+            resp["temp_c"] = roundf(chipTempC * 10.0f) / 10.0f;
+        }
         resp["transport"] = proto.activeTransportName();
         resp["chip"]      = CHIP_NAME;
         resp["proto"]       = 1;
@@ -1601,6 +1664,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         features.add("stop_all");
         features.add("wps");
         features.add("scan_results_pull");
+        features.add("temp_sensor");
         features.add("wps_lock_detect");
         features.add("wps_attempt_detect");
         #if WPS_PIXIE_SUPPORTED

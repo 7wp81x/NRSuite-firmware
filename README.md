@@ -103,10 +103,15 @@ recent active transport.
 
 ```text
 heap, heap_total, heap_used, heap_min_free, heap_max_alloc,
-psram_total, psram_free, chip_cores, cpu_mhz, flash_size, sdk
+psram_total, psram_free, chip_cores, cpu_mhz, temp_c, flash_size, sdk
 ```
 
 `psram_total` and `psram_free` are zero when the target has no PSRAM.
+
+`temp_c` is the internal chip/die temperature in Celsius and is optional. It is
+reported when the official ESP-IDF temperature-sensor driver succeeds. Classic
+ESP32 uses the ROM-backed Arduino fallback and is best-effort. This value is not
+ambient temperature. `STATUS.features` advertises `temp_sensor`.
 
 ### RAM diagnostics
 
