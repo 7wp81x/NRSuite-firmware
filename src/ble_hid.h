@@ -17,6 +17,9 @@ namespace BleHid {
 void begin(const String& deviceName);
 bool isInitialized();
 void end();
+#ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+void setPairingCompleteDiagnosticCallback(void (*cb)(bool success));
+#endif
 bool isConnected();
 bool isLinkConnected();
 bool isSessionActive();

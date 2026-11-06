@@ -13,6 +13,14 @@ static volatile bool connected   = false;
 static volatile bool sessionActive = false;
 static String peerAddr = "";
 
+#ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+static void (*pairingCompleteDiagnosticCallback)(bool success) = nullptr;
+
+void setPairingCompleteDiagnosticCallback(void (*cb)(bool success)) {
+    pairingCompleteDiagnosticCallback = cb;
+}
+#endif
+
 void begin(const String& deviceName) {
     sessionActive = true;
     if (keyboard) {
@@ -26,6 +34,13 @@ void begin(const String& deviceName) {
         return;
     }
     keyboard = new HijelHID_BLEKeyboard(deviceName.c_str(), "NRSuite", 100);
+    #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+    keyboard->onPairingComplete([](bool success) {
+        if (pairingCompleteDiagnosticCallback) {
+            pairingCompleteDiagnosticCallback(success);
+        }
+    });
+    #endif
     keyboard->begin();
     advertising = true;
 }

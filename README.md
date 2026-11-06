@@ -137,6 +137,50 @@ adb logcat -s NRSuiteMem:I NRSuiteFirmwareMem:I NRSuiteWire:I
 firmware memory event to keep output minimal. The event is sent through the
 normal protocol transport, so it does not corrupt UART-only firmware streams.
 
+### ESP32-C5 BLE HID heap diagnostic (test only)
+
+The normal BLE HID guard remains **90 KiB free / 48 KiB largest block**. The
+ESP32-C5 baseline has reported roughly 85.5 KiB free at boot, so it is rejected
+before NimBLE starts. Do not lower the release guard without measured hardware
+validation.
+
+A test-only C5 profile lowers the guard to **80 KiB / 40 KiB** and adds explicit
+heap snapshots around BLE startup, pairing, and stop:
+
+```bash
+pio run -e esp32-c5-ble-heap-diag
+```
+
+Output:
+
+```text
+release/nrsuite-esp32-c5-ble-heap-diag.bin
+```
+
+Flash it to the C5 and capture:
+
+```bash
+adb logcat -s NRSuiteFirmwareMem:I NRSuiteMem:I
+```
+
+Expected diagnostic stages:
+
+```text
+ble_start_before_guard
+ble_start_before_radio_idle
+ble_start_after_radio_idle
+ble_start_before_begin
+ble_start_after_begin
+ble_pairing_complete (or ble_pairing_failed)
+ble_stop_before_end
+ble_stop_after_end
+```
+
+Each snapshot includes `free_heap`, `heap_min_free`, `heap_max_alloc`, and
+`uptime_ms`. Use a fresh boot, start BLE HID, complete pairing, exercise a key
+report, and stop BLE. The profile is not a release artifact and must not be
+distributed.
+
 ---
 
 ## Features

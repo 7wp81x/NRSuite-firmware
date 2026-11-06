@@ -1000,6 +1000,21 @@ static void radioIdle() {
     vTaskDelay(pdMS_TO_TICKS(80));
 }
 
+#if defined(ENABLE_BLE_HID) && defined(NRSUITE_BLE_HEAP_DIAGNOSTIC)
+// Diagnostic-only heap snapshots. They use the existing "mem" event so the
+// Android app forwards them to logcat under NRSuiteFirmwareMem without adding
+// another release protocol event.
+static void sendBleHeapDiagnostic(const char* stage) {
+    JsonDocument ev;
+    ev["stage"] = stage;
+    ev["uptime_ms"] = millis();
+    ev["free_heap"] = ESP.getFreeHeap();
+    ev["heap_min_free"] = ESP.getMinFreeHeap();
+    ev["heap_max_alloc"] = ESP.getMaxAllocHeap();
+    proto.sendEvent("mem", ev);
+}
+#endif
+
 // ── LD2450 command/event layer ────────────────────────────────────────────────
 static constexpr uint32_t LD2450_BAUD = 256000;
 
@@ -3064,8 +3079,19 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             // NimBLE + HID needs roughly 65-70 KB on C3-class targets. Starting
             // with less has been observed to exhaust the heap and reset the
             // USB device. Refuse before allocation instead of crashing.
+            #ifdef NRSUITE_BLE_HID_MIN_FREE_HEAP_BYTES
+            constexpr uint32_t BLE_HID_MIN_FREE_HEAP = NRSUITE_BLE_HID_MIN_FREE_HEAP_BYTES;
+            #else
             constexpr uint32_t BLE_HID_MIN_FREE_HEAP = 90 * 1024;
+            #endif
+            #ifdef NRSUITE_BLE_HID_MIN_LARGEST_BLOCK_BYTES
+            constexpr uint32_t BLE_HID_MIN_LARGEST_BLOCK = NRSUITE_BLE_HID_MIN_LARGEST_BLOCK_BYTES;
+            #else
             constexpr uint32_t BLE_HID_MIN_LARGEST_BLOCK = 48 * 1024;
+            #endif
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_before_guard");
+            #endif
             const uint32_t freeHeap = ESP.getFreeHeap();
             const uint32_t largestBlock = ESP.getMaxAllocHeap();
             if (!BleHid::isInitialized() &&
@@ -3092,9 +3118,19 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
                 proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
                 return;
             }
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_before_radio_idle");
+            #endif
             radioIdle();
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_after_radio_idle");
+            sendBleHeapDiagnostic("ble_start_before_begin");
+            #endif
             const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
             BleHid::begin(String(name));
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_after_begin");
+            #endif
             proto.sendResp(id, true, "ble started");
         }
     }
@@ -3112,7 +3148,13 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
     }
 
     else if (strcmp(cmd, "BLE_STOP") == 0) {
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        sendBleHeapDiagnostic("ble_stop_before_end");
+        #endif
         BleHid::end();
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        sendBleHeapDiagnostic("ble_stop_after_end");
+        #endif
         blePinBruteforce.onBleEnded();
         proto.sendResp(id, true, "ble stopped");
     }
@@ -3934,6 +3976,13 @@ void setup() {
         bleScanner.begin(proto);
         bleProfile.begin(proto);
         blePinBruteforce.begin(proto);
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        BleHid::setPairingCompleteDiagnosticCallback([](bool success) {
+            sendBleHeapDiagnostic(success
+                ? "ble_pairing_complete"
+                : "ble_pairing_failed");
+        });
+        #endif
     #endif
 
 }
