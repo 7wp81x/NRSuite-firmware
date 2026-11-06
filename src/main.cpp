@@ -2898,6 +2898,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         }
         const char* bssidStr = doc["args"]["bssid"] | "";
         const bool showNotice = doc["args"]["show_notice"] | true;
+        const bool dnsHijackEnabled = doc["args"]["dns_hijack"] | true;
 
         uint8_t targetBssid[6] = {0};
         bool hasTarget = parseMac(bssidStr, targetBssid);
@@ -2908,7 +2909,8 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             channel,
             hasTarget ? targetBssid : nullptr,
             showNotice,
-            &portalError
+            &portalError,
+            dnsHijackEnabled
         );
         if (started) {
             proto.sendResp(id, true, "portal started");

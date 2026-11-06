@@ -356,7 +356,7 @@ void PortalManager::deauthTaskFn(void* pv) {
 
 // portal.cpp
 bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targetBssid,
-                          bool showNotice, String* error) {
+                          bool showNotice, String* error, bool dnsHijackEnabled) {
     stop();  // always clean up any previous state, even if a prior start() failed partway
     _showNotice = showNotice;
 
@@ -529,17 +529,19 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
 
     _running = true;
-    Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
+    if (dnsHijackEnabled) {
+        Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
+    }
     if (targetBssid) {
         memcpy(_targetBssid, targetBssid, 6);
         _hasTarget = true;
         Sniffer::instance()->setEapolFilter(true, targetBssid);
         _snifferStarted = Sniffer::instance()->startFixed(channel);
         xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle);
-    } else {
+    } else if (dnsHijackEnabled) {
         _snifferStarted = Sniffer::instance()->startDnsHijack(channel);
     }
-    if (!_snifferStarted) {
+    if (dnsHijackEnabled && !_snifferStarted) {
         // lwIP's wildcard DNS server still works for DHCP-configured clients;
         // custom-resolver interception is best-effort and must not block the AP.
         Sniffer::instance()->setDnsHijack(false);

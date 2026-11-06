@@ -50,6 +50,8 @@ static void writeBe32(uint8_t* p, uint32_t value) {
     p[3] = (uint8_t)value;
 }
 
+static constexpr uint32_t DNS_HIJACK_EVENT_INTERVAL_MS = 5000;
+
 static uint16_t ipv4HeaderChecksum(const uint8_t* data, size_t len) {
     uint32_t sum = 0;
     for (size_t i = 0; i + 1 < len; i += 2) {
@@ -479,7 +481,7 @@ void Sniffer::emitDnsHijackEvent(const IPAddress& clientIp,
     if (!_proto) return;
     const uint32_t now = millis();
     if (_lastDnsHijackEventMs != 0 &&
-        now - _lastDnsHijackEventMs < 2000) {
+        now - _lastDnsHijackEventMs < DNS_HIJACK_EVENT_INTERVAL_MS) {
         return;
     }
     _lastDnsHijackEventMs = now;
