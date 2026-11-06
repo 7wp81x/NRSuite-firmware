@@ -102,10 +102,35 @@ bool Sniffer::startClientHop(uint16_t intervalMs, bool include5ghz) {
 }
 
 bool Sniffer::startDnsHijack(uint8_t channel) {
-    if (!startFixedInternal(channel, false, false)) return false;
+    if (!isValidChannel(channel, false)) return false;
+
     // This mode exists only to answer plaintext DNS queries sent to a custom
-    // resolver. It must not stream every captured frame to the PCAP endpoint.
+    // resolver. Do not allocate the PCAP/client queues: they are unnecessary
+    // here and cost several KiB of heap on the S2/C3-class targets.
+    _clientOnly = false;
     _dnsOnly = true;
+    _include5ghz = false;
+    _hopMode = false;
+
+    wifi_promiscuous_filter_t filter;
+    filter.filter_mask = WIFI_PROMIS_FILTER_MASK_DATA;
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(&Sniffer::promiscuousCb);
+    if (esp_wifi_set_promiscuous(true) != ESP_OK) {
+        _dnsOnly = false;
+        _active = false;
+        return false;
+    }
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+    // Drain stale frames from any previous PCAP session if those queues were
+    // already allocated earlier; do not allocate new ones for this mode.
+    if (_queue) xQueueReset(_queue);
+    if (_clientQueue) xQueueReset(_clientQueue);
+
+    _channel = channel;
+    _active = true;
+    _stats = SniffStats{};
     return true;
 }
 
@@ -464,6 +489,9 @@ void Sniffer::emitDnsHijackEvent(const IPAddress& clientIp,
     event["client_ip"] = clientIp.toString();
     event["destination"] = destination.toString();
     event["count"] = _dnsHijackCount;
+    event["free_heap"] = ESP.getFreeHeap();
+    event["heap_min_free"] = ESP.getMinFreeHeap();
+    event["heap_max_alloc"] = ESP.getMaxAllocHeap();
     _proto->sendEvent("portal_dns_hijack", event);
 }
 
@@ -628,7 +656,7 @@ void Sniffer::handleDnsHijack(const wifi_promiscuous_pkt_t* pkt) {
 
 // ── processQueue — call from loop() ──────────────────────────────────────
 void Sniffer::processQueue() {
-    if (!_proto || !_queue) return;
+    if (_dnsOnly || !_proto || !_queue) return;
 
     processClientEvents();
 

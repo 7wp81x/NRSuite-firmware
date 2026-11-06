@@ -237,10 +237,12 @@ HTTP behavior:
 
 For clients that ignore DHCP DNS or have a manually configured resolver, the
 firmware starts a promiscuous best-effort DNS hook automatically whenever the
-portal runs. There is no user-facing toggle. Plaintext IPv4 UDP DNS queries
-sent to an external resolver are answered with `192.168.4.1`, and the app
-receives a rate-limited `portal_dns_hijack` event. This covers common manual-DNS
-configurations, but it cannot intercept:
+portal runs. There is no user-facing toggle. The DNS-only path does not allocate
+the PCAP/client queues; it uses a fixed stack buffer per intercepted query.
+Plaintext IPv4 UDP DNS queries sent to an external resolver are answered with
+`192.168.4.1`, and the app receives a rate-limited `portal_dns_hijack` event
+containing current `free_heap`, `heap_min_free`, and `heap_max_alloc`. This
+covers common manual-DNS configurations, but it cannot intercept:
 
 - DNS over HTTPS or DNS over TLS;
 - DNS over TCP;
