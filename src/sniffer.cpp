@@ -1,5 +1,7 @@
 #include "sniffer.h"
 
+#include <esp_heap_caps.h>
+
 Sniffer* Sniffer::_instance = nullptr;
 
 #pragma pack(push, 1)
@@ -157,16 +159,55 @@ bool Sniffer::isValidChannel(uint8_t channel, bool include5ghz) const {
     return false;
 }
 
+bool Sniffer::ensureCaptureQueues() {
+    if (!_queue) {
+        // Prefer PSRAM for the bulk frame storage when available. Queue
+        // control structures stay in internal RAM. This keeps roughly 11 KiB
+        // of per-sniff-session buffers out of internal SRAM on S3 PSRAM boards.
+        const size_t queueBytes = SNIFF_QUEUE_DEPTH * sizeof(CapturedFrame);
+        _queueStorage = (uint8_t*)heap_caps_malloc(
+            queueBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (_queueStorage) {
+            _queue = xQueueCreateStatic(
+                SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame),
+                _queueStorage, &_queueControl);
+            if (!_queue) {
+                heap_caps_free(_queueStorage);
+                _queueStorage = nullptr;
+            }
+        }
+        if (!_queue) {
+            _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
+        }
+    }
+
+    if (!_clientQueue) {
+        const size_t clientQueueBytes =
+            CLIENT_EVENT_QUEUE_DEPTH * sizeof(ClientEvent);
+        _clientQueueStorage = (uint8_t*)heap_caps_malloc(
+            clientQueueBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (_clientQueueStorage) {
+            _clientQueue = xQueueCreateStatic(
+                CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent),
+                _clientQueueStorage, &_clientQueueControl);
+            if (!_clientQueue) {
+                heap_caps_free(_clientQueueStorage);
+                _clientQueueStorage = nullptr;
+            }
+        }
+        if (!_clientQueue) {
+            _clientQueue = xQueueCreate(
+                CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent));
+        }
+    }
+
+    return _queue != nullptr && _clientQueue != nullptr;
+}
+
 bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz) {
     if (!isValidChannel(channel, include5ghz)) return false;
     _dnsOnly = false;
-    if (!_queue) {
-        _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
-    }
-    if (!_clientQueue) {
-        _clientQueue = xQueueCreate(CLIENT_EVENT_QUEUE_DEPTH, sizeof(ClientEvent));
-    }
-    if (!_queue || !_clientQueue) return false;
+    if (!ensureCaptureQueues()) return false;
     _clientOnly = clientOnly;
     _include5ghz = include5ghz;
 

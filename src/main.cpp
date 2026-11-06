@@ -1583,6 +1583,9 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         #if defined(CONFIG_IDF_TARGET_ESP32C5)
             features.add("wifi_5ghz");
         #endif
+        if (ESP.getPsramSize() > 0) {
+            features.add("psram");
+        }
         features.add("sniff");
         features.add("auto_handshake");
         features.add("nrugochi");
@@ -3818,6 +3821,8 @@ static void handleCmdWithMemoryLog(uint8_t id, JsonDocument& doc) {
     mem["free_after"] = ESP.getFreeHeap();
     mem["min_free"] = ESP.getMinFreeHeap();
     mem["largest"] = ESP.getMaxAllocHeap();
+    mem["psram_total"] = ESP.getPsramSize();
+    mem["psram_free"] = ESP.getFreePsram();
     mem["transport"] = proto.activeTransportName();
     proto.sendEvent("mem", mem);
 }

@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include "BridgeProtocol.h"
 
 // Tunables
@@ -65,6 +67,10 @@ private:
     BridgeProtocol* _proto = nullptr;
     QueueHandle_t   _queue = nullptr;
     QueueHandle_t   _clientQueue = nullptr;
+    StaticQueue_t   _queueControl = {};
+    StaticQueue_t   _clientQueueControl = {};
+    uint8_t*        _queueStorage = nullptr;
+    uint8_t*        _clientQueueStorage = nullptr;
 
     bool     _active       = false;
     bool     _hopMode      = false;
@@ -108,6 +114,7 @@ private:
     bool   matchesTargetBssid(const wifi_promiscuous_pkt_t* pkt) const;
     bool   startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz);
     bool   startHopInternal(uint16_t intervalMs, bool clientOnly, bool include5ghz);
+    bool   ensureCaptureQueues();
     bool   isValidChannel(uint8_t channel, bool include5ghz) const;
     void   processClientEvents();
     bool   enqueueClientEvent(wifi_promiscuous_pkt_t* pkt);

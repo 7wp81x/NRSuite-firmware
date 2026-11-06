@@ -355,7 +355,8 @@ Build a specific board:
 
 ```bash
 pio run -e esp32-c3
-pio run -e esp32-s3
+pio run -e esp32-s3             # S3 without PSRAM
+pio run -e esp32-s3-psram       # S3 with 2 MB QSPI PSRAM
 pio run -e esp32-s2
 pio run -e esp32-devkit
 ```
@@ -363,8 +364,29 @@ pio run -e esp32-devkit
 Build all targets:
 
 ```bash
-pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
+pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s3-psram \
+  -e esp32-s2 -e esp32-devkit
 ```
+
+### PSRAM use
+
+The `esp32-s3-psram` profile targets boards such as the ESP32-S3 DevKitC-1
+N4R2: 4 MB flash plus 2 MB QSPI PSRAM. PSRAM is detected at runtime and reported
+through `STATUS.psram_total` / `STATUS.psram_free`; `STATUS.features` includes
+`psram` when present. The no-PSRAM `esp32-s3` profile remains separate.
+
+PSRAM is currently used opportunistically for large non-DMA buffers. The
+packet-sniffer frame and client-event queues are allocated with
+`heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` when PSRAM is
+available, with an internal-RAM fallback on boards without PSRAM. This keeps
+roughly 11 KiB of per-sniff-session queue storage out of internal SRAM on PSRAM
+boards.
+
+PSRAM cannot replace internal SRAM for all uses. WiFi/BLE DMA buffers, interrupt
+handlers, critical stacks, and many lwIP/AsyncTCP allocations must remain in
+internal RAM. Future candidates for PSRAM include large scan/WPS caches and
+non-DMA protocol buffers, but each must be measured for performance and cache
+safety.
 
 ### Release logging
 
