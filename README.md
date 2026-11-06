@@ -366,6 +366,30 @@ Build all targets:
 pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
 ```
 
+### Release logging
+
+Release builds compile out raw serial debug output by default:
+
+- NRSuite modules use `NRSUITE_DEBUG_*` from `src/NrDebugLog.h`, controlled by
+  `NRSUITE_DEBUG_SERIAL` (default `0`).
+- The Hijel BLE HID library logs only when compiled with
+  `HIJEL_HID_ENABLE_LOGGING=1` (default `0`).
+- ESP-IDF core logging is kept low with `CORE_DEBUG_LEVEL=0`.
+
+Raw `Serial` output must stay disabled on UART-only targets because `Serial` is
+also the NRSuite protocol transport. To enable module debug logs for a local
+diagnostic build:
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-DNRSUITE_DEBUG_SERIAL=1 -DHIJEL_HID_ENABLE_LOGGING=1" \
+  pio run -e esp32-devkit
+```
+
+These switches primarily reduce flash/string and stack usage; they do not
+reclaim large amounts of heap. The firmware's static RAM usage is reported by
+the linker from `.dram0.data + .dram0.bss`, while runtime free heap comes from
+`heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`.
+
 ### LD2450 standalone serial bring-up
 
 Normal builds leave the LD2450 stopped until Android sends `LD2450_START`.
