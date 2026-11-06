@@ -32,6 +32,7 @@ private:
     bool _showNotice = true;
     bool _storageMounted = false;
     bool _apStarted = false;
+    bool _snifferStarted = false;
     File _htmlFile;
     uint8_t _targetBssid[6] = {0};
     bool _hasTarget = false;
@@ -54,6 +55,7 @@ private:
                          bool ignoreAttemptArg = false);
     String loadingPlaceholder() const;
     String noticePage() const;
+    void sendLandingResponse(AsyncWebServerRequest* request);
     void sendPortalContent(AsyncWebServerRequest* request);
     bool mountPortalStorage();
     void unmountPortalStorage();

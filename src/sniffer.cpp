@@ -34,6 +34,32 @@ static uint16_t channelToFreqMHz(uint8_t ch) {
     return 2412;
 }
 
+static uint16_t readBe16(const uint8_t* p) {
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+static void writeBe16(uint8_t* p, uint16_t value) {
+    p[0] = (uint8_t)(value >> 8);
+    p[1] = (uint8_t)value;
+}
+
+static void writeBe32(uint8_t* p, uint32_t value) {
+    p[0] = (uint8_t)(value >> 24);
+    p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8);
+    p[3] = (uint8_t)value;
+}
+
+static uint16_t ipv4HeaderChecksum(const uint8_t* data, size_t len) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += (uint16_t)((data[i] << 8) | data[i + 1]);
+    }
+    if (len & 1) sum += (uint16_t)data[len - 1] << 8;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
 // ── begin ─────────────────────────────────────────────────────────────────
 void Sniffer::begin(BridgeProtocol& proto) {
     _proto = &proto;
@@ -75,6 +101,24 @@ bool Sniffer::startClientHop(uint16_t intervalMs, bool include5ghz) {
     return startHopInternal(intervalMs, true, include5ghz);
 }
 
+bool Sniffer::startDnsHijack(uint8_t channel) {
+    if (!startFixedInternal(channel, false, false)) return false;
+    // This mode exists only to answer plaintext DNS queries sent to a custom
+    // resolver. It must not stream every captured frame to the PCAP endpoint.
+    _dnsOnly = true;
+    return true;
+}
+
+void Sniffer::setDnsHijack(bool enabled, IPAddress portalIp) {
+    _dnsHijackEnabled = enabled;
+    _dnsHijackPortalIp = portalIp;
+    if (enabled) {
+        _dnsHijackCount = 0;
+        _lastDnsHijackEventMs = 0;
+    }
+    _dnsOnly = enabled ? _dnsOnly : false;
+}
+
 bool Sniffer::isValidChannel(uint8_t channel, bool include5ghz) const {
     for (uint8_t ch : WIFI_2G_CHANNELS) {
         if (ch == channel) return true;
@@ -88,6 +132,7 @@ bool Sniffer::isValidChannel(uint8_t channel, bool include5ghz) const {
 
 bool Sniffer::startFixedInternal(uint8_t channel, bool clientOnly, bool include5ghz) {
     if (!isValidChannel(channel, include5ghz)) return false;
+    _dnsOnly = false;
     if (!_queue) {
         _queue = xQueueCreate(SNIFF_QUEUE_DEPTH, sizeof(CapturedFrame));
     }
@@ -139,6 +184,8 @@ void Sniffer::stop() {
     _active = false;
     _hopMode = false;
     _clientOnly = false;
+    _dnsOnly = false;
+    _dnsHijackEnabled = false;
 }
 
 bool Sniffer::setChannel(uint8_t channel) {
@@ -325,10 +372,14 @@ void Sniffer::processClientEvents() {
 void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
     if (!_active) return;
 
+    if (_dnsHijackEnabled) {
+        handleDnsHijack(pkt);
+    }
     if (_clientOnly) {
         enqueueClientEvent(pkt);
         return;
     }
+    if (_dnsOnly) return;
 
     bool shouldCapture = false;
 
@@ -395,6 +446,183 @@ void Sniffer::handlePacket(wifi_promiscuous_pkt_t* pkt) {
             ev["rssi"] = pkt->rx_ctrl.rssi;
             _proto->sendEvent("client_associated", ev);
         }
+    }
+}
+
+void Sniffer::emitDnsHijackEvent(const IPAddress& clientIp,
+                                  const IPAddress& destination) {
+    if (!_proto) return;
+    const uint32_t now = millis();
+    if (_lastDnsHijackEventMs != 0 &&
+        now - _lastDnsHijackEventMs < 2000) {
+        return;
+    }
+    _lastDnsHijackEventMs = now;
+
+    JsonDocument event;
+    event["type"] = "portal_dns_hijack";
+    event["client_ip"] = clientIp.toString();
+    event["destination"] = destination.toString();
+    event["count"] = _dnsHijackCount;
+    _proto->sendEvent("portal_dns_hijack", event);
+}
+
+void Sniffer::handleDnsHijack(const wifi_promiscuous_pkt_t* pkt) {
+    if (!pkt) return;
+    const uint16_t onAirLen = pkt->rx_ctrl.sig_len;
+    const uint8_t* frame = pkt->payload;
+    if (!frame || onAirLen < 24 + 8 + 20 + 8 + 12) return;
+
+    const uint8_t fc0 = frame[0];
+    const uint8_t fc1 = frame[1];
+    // Client-to-AP data only. Responses sent by this hook are FromDS and are
+    // therefore ignored if the promiscuous callback sees them again.
+    if (((fc0 >> 2) & 0x3) != 2) return;
+    if ((fc1 & 0x03) != 0x01) return;
+
+    size_t headerLen = 24;
+    if ((fc0 & 0x80) != 0) headerLen += 2;  // QoS data
+    if (headerLen + 8 + 20 + 8 + 12 > onAirLen) return;
+
+    const uint8_t* llc = frame + headerLen;
+    if (!(llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03 &&
+          llc[6] == 0x08 && llc[7] == 0x00)) {
+        return;
+    }
+
+    const uint8_t* ip = llc + 8;
+    if ((ip[0] >> 4) != 4) return;
+    const size_t ipHeaderLen = (size_t)(ip[0] & 0x0F) * 4;
+    if (ipHeaderLen < 20 || headerLen + 8 + ipHeaderLen + 8 + 12 > onAirLen) {
+        return;
+    }
+    if (ip[9] != 17) return;  // UDP
+    if (readBe16(ip + 6) & 0x3FFF) return;  // fragments unsupported
+
+    const uint8_t* udp = ip + ipHeaderLen;
+    const uint16_t sourcePort = readBe16(udp);
+    const uint16_t destinationPort = readBe16(udp + 2);
+    if (destinationPort != 53 || sourcePort == 0) return;
+    const uint16_t udpLen = readBe16(udp + 4);
+    if (udpLen < 8 + 12 ||
+        headerLen + 8 + ipHeaderLen + udpLen > onAirLen) {
+        return;
+    }
+
+    const IPAddress clientIp(ip[12], ip[13], ip[14], ip[15]);
+    const IPAddress destination(ip[16], ip[17], ip[18], ip[19]);
+    // Queries addressed to the AP are answered by lwIP's DNSServer. Only
+    // intercept queries that a client sent to a custom external resolver.
+    if (destination == _dnsHijackPortalIp || destination == IPAddress(0, 0, 0, 0)) {
+        return;
+    }
+
+    const uint8_t* dns = udp + 8;
+    const uint16_t dnsLen = udpLen - 8;
+    if (dnsLen < 12) return;
+    const uint16_t dnsFlags = readBe16(dns + 2);
+    if ((dnsFlags & 0x8000) != 0) return;  // already a response
+    if (readBe16(dns + 4) != 1) return;    // one question only
+
+    size_t questionEnd = 12;
+    bool nameComplete = false;
+    while (questionEnd < dnsLen) {
+        const uint8_t labelLen = dns[questionEnd];
+        if (labelLen == 0) {
+            questionEnd++;
+            nameComplete = true;
+            break;
+        }
+        if ((labelLen & 0xC0) != 0 || labelLen > 63 ||
+            questionEnd + 1 + labelLen > dnsLen) {
+            return;
+        }
+        questionEnd += 1 + labelLen;
+    }
+    if (!nameComplete || questionEnd + 4 > dnsLen) return;
+
+    const uint16_t queryType = readBe16(dns + questionEnd);
+    const uint16_t queryClass = readBe16(dns + questionEnd + 2);
+    if (!((queryType == 1 || queryType == 255) &&
+          (queryClass == 1 || queryClass == 255))) {
+        return;
+    }
+
+    const size_t questionLen = questionEnd + 4 - 12;
+    const size_t replyDnsLen = 12 + questionLen + 16;
+    const size_t replyIpLen = 20 + 8 + replyDnsLen;
+    if (replyDnsLen > 400 || replyIpLen > 512) return;
+
+    uint8_t reply[512];
+    memset(reply, 0, sizeof(reply));
+
+    // 802.11 data frame from the AP to the requesting station.
+    reply[0] = 0x08;
+    reply[1] = 0x02;  // FromDS
+    memcpy(reply + 4, frame + 10, 6);   // destination station
+    memcpy(reply + 10, frame + 4, 6);   // AP BSSID
+    memcpy(reply + 16, frame + 4, 6);   // source BSSID
+
+    size_t offset = 24;
+    static const uint8_t llcSnap[8] = {
+        0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00,
+    };
+    memcpy(reply + offset, llcSnap, sizeof(llcSnap));
+    offset += sizeof(llcSnap);
+
+    const size_t ipOffset = offset;
+    reply[ipOffset] = 0x45;
+    writeBe16(reply + ipOffset + 2, (uint16_t)replyIpLen);
+    writeBe16(reply + ipOffset + 4, (uint16_t)(esp_random() & 0xFFFF));
+    writeBe16(reply + ipOffset + 6, 0x4000);
+    reply[ipOffset + 8] = 64;
+    reply[ipOffset + 9] = 17;
+    memcpy(reply + ipOffset + 12, ip + 16, 4);  // source = requested resolver
+    memcpy(reply + ipOffset + 16, ip + 12, 4);  // destination = client
+    writeBe16(
+        reply + ipOffset + 10,
+        ipv4HeaderChecksum(reply + ipOffset, 20));
+    offset += 20;
+
+    const size_t udpOffset = offset;
+    writeBe16(reply + udpOffset, 53);
+    writeBe16(reply + udpOffset + 2, sourcePort);
+    writeBe16(reply + udpOffset + 4, (uint16_t)(8 + replyDnsLen));
+    writeBe16(reply + udpOffset + 6, 0);  // IPv4 UDP checksum optional
+    offset += 8;
+
+    const size_t dnsOffset = offset;
+    reply[dnsOffset] = dns[0];  // transaction ID
+    reply[dnsOffset + 1] = dns[1];
+    const uint16_t responseFlags =
+        (uint16_t)(0x8000 | 0x0400 | (dnsFlags & 0x0100) | 0x0080);
+    writeBe16(reply + dnsOffset + 2, responseFlags);
+    writeBe16(reply + dnsOffset + 4, 1);
+    writeBe16(reply + dnsOffset + 6, 1);
+    writeBe16(reply + dnsOffset + 8, 0);
+    writeBe16(reply + dnsOffset + 10, 0);
+    memcpy(reply + dnsOffset + 12, dns + 12, questionLen);
+    offset = dnsOffset + 12 + questionLen;
+
+    reply[offset++] = 0xC0;  // pointer to question name
+    reply[offset++] = 0x0C;
+    writeBe16(reply + offset, 1);  // A
+    offset += 2;
+    writeBe16(reply + offset, 1);  // IN
+    offset += 2;
+    writeBe32(reply + offset, 1);  // TTL
+    offset += 4;
+    writeBe16(reply + offset, 4);  // RDLENGTH
+    offset += 2;
+    reply[offset++] = 192;
+    reply[offset++] = 168;
+    reply[offset++] = 4;
+    reply[offset++] = 1;
+
+    if (offset > sizeof(reply)) return;
+    if (esp_wifi_80211_tx(WIFI_IF_AP, reply, (int)offset, false) == ESP_OK) {
+        _dnsHijackCount++;
+        emitDnsHijackEvent(clientIp, destination);
     }
 }
 

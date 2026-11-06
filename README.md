@@ -202,7 +202,7 @@ distributed.
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
-| Captive Portal | All | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. |
+| Captive Portal | All | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. The AP advertises itself as the DHCP DNS/CP-URI target, answers wildcard DNS, force-serves the landing page for unmatched HTTP routes, and best-effort intercepts plaintext custom-resolver DNS queries. |
 | BLE HID | C3, C5, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
 | BLE Scanner | C3, C5, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
@@ -220,6 +220,36 @@ distributed.
 > The regulatory country is configured from Android Settings and enforced by
 > the firmware channel mask. All current ESP32 target builds advertise
 > `wps_pixie`; raw-frame injection uses target-appropriate wrapper flags.
+
+### Captive-portal routing and custom DNS
+
+The portal SoftAP uses `192.168.4.1/24` with the DHCP lease pool starting at
+`192.168.4.2`. Firmware explicitly advertises `192.168.4.1` as the DHCP DNS
+server and enables DHCP option 114 (captive-portal URI) when supported by the
+Arduino/IDF core.
+
+HTTP behavior:
+
+- `/` and `/continue` serve the landing/custom page.
+- `/login` handles POST and GET form submissions.
+- Every other URI is served the landing/custom page directly. It is not
+  dependent on the client following a 3xx redirect.
+
+For clients that ignore DHCP DNS or have a manually configured resolver, the
+firmware starts a promiscuous best-effort DNS hook automatically whenever the
+portal runs. There is no user-facing toggle. Plaintext IPv4 UDP DNS queries
+sent to an external resolver are answered with `192.168.4.1`, and the app
+receives a rate-limited `portal_dns_hijack` event. This covers common manual-DNS
+configurations, but it cannot intercept:
+
+- DNS over HTTPS or DNS over TLS;
+- DNS over TCP;
+- IPv6 DNS queries;
+- clients using a hardcoded IP-based connectivity probe.
+
+Those clients may still require a manual portal URL or an OS-specific
+captive-portal bypass. The custom-DNS path needs real-device validation before
+being described as universal.
 
 ### Portal HTML storage
 
