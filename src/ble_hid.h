@@ -18,6 +18,8 @@ void begin(const String& deviceName);
 bool isInitialized();
 void end();
 bool isConnected();
+bool isLinkConnected();
+bool isSessionActive();
 bool isBonded();
 String peerAddress();
 void clearBonds();

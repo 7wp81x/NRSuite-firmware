@@ -10,9 +10,11 @@ namespace BleHid {
 static HijelHID_BLEKeyboard* keyboard = nullptr;
 static volatile bool advertising = false;
 static volatile bool connected   = false;
+static volatile bool sessionActive = false;
 static String peerAddr = "";
 
 void begin(const String& deviceName) {
+    sessionActive = true;
     if (keyboard) {
         if (keyboard->isPaired()) {
             return;
@@ -33,6 +35,7 @@ bool isInitialized() {
 }
 
 void end() {
+    sessionActive = false;
     if (!keyboard) return;
     keyboard->releaseAll();
     // Keep the keyboard/GATT objects alive so a later begin() can restart
@@ -50,7 +53,19 @@ bool isAdvertising() {
 }
 
 bool isConnected() {
+    // Authenticated HID-ready state. During pairing the GAP link exists but
+    // this remains false until the security handshake completes.
     return keyboard && keyboard->isPaired();
+}
+
+bool isLinkConnected() {
+    // GAP-level link state. Used by the host/UI status poll so a pairing
+    // handshake is not mistaken for a stopped BLE HID session.
+    return keyboard && keyboard->isConnected();
+}
+
+bool isSessionActive() {
+    return keyboard && sessionActive;
 }
 
 bool isBonded() {

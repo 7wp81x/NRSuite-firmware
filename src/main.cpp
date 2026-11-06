@@ -3103,6 +3103,8 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         JsonDocument resp;
         resp["ok"]          = true; 
         resp["connected"]   = BleHid::isConnected();
+        resp["linked"]      = BleHid::isLinkConnected();
+        resp["active"]      = BleHid::isSessionActive();
         resp["advertising"] = BleHid::isAdvertising();   // ← NEW
         resp["peer"]        = BleHid::peerAddress();
         String json; serializeJson(resp, json);
