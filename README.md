@@ -196,8 +196,8 @@ distributed.
 |---|---|---|
 | Wi-Fi Scan | All (C5: 2.4/5 GHz) | AP scan with SSID, BSSID, channel, RSSI, and security type; C5 scans use dual-band AUTO mode plus explicit 2.4/5 GHz channel bitmaps, with passive timing for 5 GHz scans. |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
-| Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
-| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
+| Nrugochi capture support | C3, C5, S3, classic ESP32 | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry. Disabled on ESP32-S2 for release memory/profile reasons. |
+| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s3-psram`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, capture-preserving `DEAUTH_BURST` retries, and firmware-native `DEAUTH_MULTI` with per-target channel scheduling and aggregate/per-target counters. Advertises `deauth_multi`. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | All | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie` on all ESP32 targets. |
@@ -207,7 +207,7 @@ distributed.
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
-| Captive Portal | All | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. The AP advertises itself as the DHCP DNS/CP-URI target, answers wildcard DNS, force-serves the landing page for unmatched HTTP routes, and best-effort intercepts plaintext custom-resolver DNS queries. |
+| Captive Portal | C3, C5, S3, classic ESP32 | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. The AP advertises itself as the DHCP DNS/CP-URI target, answers wildcard DNS, force-serves the landing page for unmatched HTTP routes, and best-effort intercepts plaintext custom-resolver DNS queries. Disabled on ESP32-S2 until the FAT/portal storage path is validated. |
 | BLE HID | C3, C5, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
 | BLE Scanner | C3, C5, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
@@ -372,6 +372,9 @@ Build all targets:
 pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s3-psram \
   -e esp32-s2 -e esp32-devkit
 ```
+
+Firmware library dependencies are pinned to exact tested versions in
+`platformio.ini` for reproducible release builds.
 
 ### PSRAM use
 

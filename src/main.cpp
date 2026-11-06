@@ -27,6 +27,10 @@
 
 #define FW_VERSION "1.0.0-beta.3.1.2"
 
+#ifndef NRSUITE_ENABLE_NRUGOCHI
+#define NRSUITE_ENABLE_NRUGOCHI 1
+#endif
+
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0
 #endif
@@ -89,7 +93,9 @@ BridgeProtocol proto(Serial, "usb_cdc");
 BridgeProtocol proto(Serial, "uart0");
 #endif
 Sniffer        sniffer;
+#if NRSUITE_ENABLE_PORTAL
 PortalManager  portal;
+#endif
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
@@ -180,7 +186,9 @@ static bool readChipTemperatureC(float&) {
 #endif
 
 // ── IDF-level scan ───────────────────────────────────────────────────────────
+#if NRSUITE_ENABLE_PORTAL
 static uint16_t g_lastHtmlSeq = 0xFFFF;
+#endif
 
 
 enum class WifiBandMode : uint8_t {
@@ -1025,7 +1033,9 @@ static void stopRadioModules() {
     deauthDetector.stop();
     hiddenApDetector.stop();
     beacon.stop();
+    #if NRSUITE_ENABLE_PORTAL
     portal.stop();
+    #endif
     wpsPixie.stop();
     wpsAttemptDetector.stop();
     esp_wifi_set_promiscuous(false);
@@ -1650,17 +1660,21 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             features.add("psram");
         }
         features.add("sniff");
+        #if NRSUITE_ENABLE_NRUGOCHI
         features.add("auto_handshake");
         features.add("nrugochi");
+        #endif
         features.add("client_detect");
         features.add("deauth");
         features.add("deauth_multi");
         features.add("deauth_detect");
         features.add("beacon");
+        #if NRSUITE_ENABLE_PORTAL
         features.add("portal");
-        features.add("reboot");
         features.add("portal_html_offset");
         features.add("html_diag");
+        #endif
+        features.add("reboot");
         features.add("stop_all");
         features.add("wps");
         features.add("scan_results_pull");
@@ -1706,7 +1720,11 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         if (sniffer.active()) {
             resp["channel"] = sniffer.channel();
         }
+        #if NRSUITE_ENABLE_PORTAL
         resp["portal"]   = portal.isRunning();
+        #else
+        resp["portal"]   = false;
+        #endif
         resp["beacon"]   = beacon.active();
         resp["deauth_detector"] = deauthDetector.active();
         resp["hidden_ap"] = hiddenApDetector.active();
@@ -2924,6 +2942,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+#if NRSUITE_ENABLE_PORTAL
     // ── CAPTIVE PORTAL ────────────────────────────────────────────────────
     else if (strcmp(cmd, "START_PORTAL") == 0) {
         radioIdle();  // stop sniff / beacon / prior portal before starting
@@ -3095,6 +3114,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
+#endif
     #ifdef ENABLE_BLE_HID
     else if (strcmp(cmd, "BLE_SCAN_START") == 0) {
         mesh.stop();
@@ -4006,6 +4026,7 @@ void setup() {
     proto.onCmd(handleCmdWithMemoryLog);
     proto.onAck(handleAck);
 
+    #if NRSUITE_ENABLE_PORTAL
     proto.onHtml([](const uint8_t* data, size_t len) {
         if (len < 3) return;  // need at least seq(2) + isLast(1)
 
@@ -4029,10 +4050,13 @@ void setup() {
         serializeJson(doc, json);
         proto.sendRaw(TYPE_RESP, 0, (const uint8_t*)json.c_str(), json.length());
     });
+    #endif
 
 
     sniffer.begin(proto);
+    #if NRSUITE_ENABLE_PORTAL
     portal.begin(proto);
+    #endif
     beacon.begin(proto);
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
@@ -4065,7 +4089,9 @@ void loop() {
     
     sniffer.processQueue();
     sniffer.handleHop();
+    #if NRSUITE_ENABLE_PORTAL
     portal.update();
+    #endif
     beacon.update();
     deauthDetector.update();
     hiddenApDetector.update();

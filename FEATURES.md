@@ -15,15 +15,15 @@ This document lists all current and planned features across the NRSuite ecosyste
 
 | Feature | Status | Notes |
 |---|---|---|
-| Firmware Release Assets | ✅ | Release CI builds merged images for ESP32-C5, C3, S3, S2, and classic ESP32; C5 merged image uses the correct `0x2000` bootloader layout |
+| Firmware Release Assets | ✅ | Release CI builds merged images for ESP32-C5, C3, S3, S3 PSRAM, S2, and classic ESP32; C5 merged image uses the correct `0x2000` bootloader layout |
 | Wi-Fi Scan | ✅ | Active AP/channel discovery; band-aware `SCAN_WIFI`/`scan_ap`, AUTO 2.4+5 GHz on C5, 2.4 GHz fallback elsewhere; serialized scans with configurable settle/dwell, classic-ESP32 500 ms default dwell, low-result retry, and serial diagnostics; regulatory country/channel mask exposed via `STATUS` |
 | Beacon Injection | ✅ | Beacon frame injection/spoofing |
 | Deauthentication | ✅ | Deauth frame injection; finite burst or stoppable duration-based loop mode using `DEAUTH_STOP`; firmware-native up-to-32-target `DEAUTH_MULTI` with per-target channel schedules and counters |
 | Evil Twin | ✅ | Rogue AP with file-backed captive portal; `show_notice` firmware notice toggle; `#SSID#` pre-rendered by Android; visitor MAC/IP/User-Agent events with best-effort station lookup |
-| Captive Portal | ✅ | File-backed HTML on FAT for S2/S3 or LittleFS `portal` partition for C3/C5/classic; chunked upload and streamed serving; POST and GET captive-data capture; persistent HTTP/DNS listeners to avoid lwIP rebind races, start-failure cleanup, AP/DNS reset startup, and hidden protected helper-AP restoration between restarts |
+| Captive Portal | ✅ | File-backed HTML on FAT for S3 or LittleFS `portal` partition for C3/C5/classic; chunked upload and streamed serving; POST and GET captive-data capture; persistent HTTP/DNS listeners to avoid lwIP rebind races, start-failure cleanup, AP/DNS reset startup, and hidden protected helper-AP restoration between restarts. Disabled on ESP32-S2 until the FFat/portal-storage path is validated. |
 | Packet Sniffer | ✅ | Monitor-mode capture, pcap export; AUTO/2.4/5 GHz hop selection on C5, target-channel-aware fixed capture, and capture-preserving deauth retries |
 | WPA Handshake Capture/Crack | ✅ | Offline WPA2 M1/M2 dictionary cracking support and capture-assist flows; app-side PCAP → `.22000` conversion and WPA*02 import are implemented |
-| Nrugochi channel capture support | ✅ | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` supports multi-AP deauth plus all-EAPOL/all-beacon capture and reports requested/sent/failed frame counts |
+| Nrugochi channel capture support | ✅ | Advertises `nrugochi` on C3/C5/S3/classic ESP32; `DEAUTH_CHANNEL_CAPTURE` supports multi-AP deauth plus all-EAPOL/all-beacon capture and reports requested/sent/failed frame counts. Disabled on ESP32-S2. |
 | WPS Pixie Dust | All | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie` on all ESP32 targets. |
 | WPS Lock Detector | All | Passive beacon/probe-response scan that parses WPS IEs and reports AP Setup Locked state, WPS version, configuration methods, and selected-registrar metadata. Advertises `wps_lock_detect`. |
 | WPS Attempt Detector | All | Passive EAP-WSC monitor tracks Identity/M1-M8/M2D/NACK sessions by BSSID and source client MAC, preserves per-session evidence flags, and emits live WPS lock-state changes. Advertises `wps_attempt_detect`. |

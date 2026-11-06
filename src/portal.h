@@ -7,6 +7,10 @@
 #include "BridgeProtocol.h"
 #include "sniffer.h"
 
+#ifndef NRSUITE_ENABLE_PORTAL
+#define NRSUITE_ENABLE_PORTAL 1
+#endif
+
 class PortalManager {
 public:
     void begin(BridgeProtocol& proto);
