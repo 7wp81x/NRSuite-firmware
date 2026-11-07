@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1.1-yellow.svg)](../../releases)
+[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.2.0-yellow.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current release line:** `1.0.0-beta.3.1.1`. Mesh support from merged mesh branches is present but experimental.
+**Current release line:** `1.0.0-beta.3.2.0`. Mesh support from merged mesh branches is present but experimental.
 
 ---
 
@@ -73,6 +73,119 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 **Recommended board for getting started:** ESP32-C3 DevKitM-1. It has native USB CDC (no external USB-UART chip), BLE, and is the default build target.
 
+### Protocol transport
+
+Native-USB-capable targets (C3, C5, S2, S3, and C6 when enabled) listen for
+the NRSuite protocol on **both** the native USB CDC/JTAG port and UART0. This
+allows one firmware image to work with devkits that expose separate `USB` and
+`UART` connectors.
+
+Classic ESP32 targets remain UART-only because they have no native USB
+peripheral.
+
+`PING`, `STATUS`, and heartbeat events include a `transport` field, for example:
+
+```json
+{ "ok": true, "msg": "pong", "transport": "usb_cdc" }
+```
+
+or:
+
+```json
+{ "ok": true, "msg": "pong", "transport": "uart0" }
+```
+
+The Android app should connect to only one physical port at a time. Commands are
+answered on the transport that sent them, and asynchronous events follow the most
+recent active transport.
+
+`STATUS` also exposes device telemetry used by the Android Device specs screen:
+
+```text
+heap, heap_total, heap_used, heap_min_free, heap_max_alloc,
+psram_total, psram_free, chip_cores, cpu_mhz, temp_c, flash_size, sdk
+```
+
+`psram_total` and `psram_free` are zero when the target has no PSRAM.
+
+`temp_c` is the internal chip/die temperature in Celsius and is optional. It is
+reported when the official ESP-IDF temperature-sensor driver succeeds. Classic
+ESP32 uses the ROM-backed Arduino fallback and is best-effort. This value is not
+ambient temperature. `STATUS.features` advertises `temp_sensor`.
+
+### RAM diagnostics
+
+Firmware sends a compact `mem` event for non-noise module commands:
+
+```json
+{
+  "type": "mem",
+  "cmd": "SNIFF_START",
+  "start_ms": 123456,
+  "end_ms": 123789,
+  "duration_ms": 333,
+  "free_before": 90612,
+  "free_after": 90000,
+  "min_free": 85980,
+  "largest": 61428,
+  "transport": "uart0"
+}
+```
+
+The Android app prints module lifecycle lines and forwards these firmware events:
+
+```bash
+adb logcat -s NRSuiteMem:I NRSuiteFirmwareMem:I NRSuiteWire:I
+```
+
+`PING`, `STATUS`, and `HEAP` commands are intentionally excluded from the
+firmware memory event to keep output minimal. The event is sent through the
+normal protocol transport, so it does not corrupt UART-only firmware streams.
+
+### ESP32-C5 BLE HID heap diagnostic (test only)
+
+The normal BLE HID guard remains **90 KiB free / 48 KiB largest block**. The
+ESP32-C5 baseline has reported roughly 85.5 KiB free at boot, so it is rejected
+before NimBLE starts. Do not lower the release guard without measured hardware
+validation.
+
+A test-only C5 profile lowers the guard to **80 KiB / 40 KiB** and adds explicit
+heap snapshots around BLE startup, pairing, and stop:
+
+```bash
+pio run -e esp32-c5-ble-heap-diag
+```
+
+Output:
+
+```text
+release/nrsuite-esp32-c5-ble-heap-diag.bin
+```
+
+Flash it to the C5 and capture:
+
+```bash
+adb logcat -s NRSuiteFirmwareMem:I NRSuiteMem:I
+```
+
+Expected diagnostic stages:
+
+```text
+ble_start_before_guard
+ble_start_before_radio_idle
+ble_start_after_radio_idle
+ble_start_before_begin
+ble_start_after_begin
+ble_pairing_complete (or ble_pairing_failed)
+ble_stop_before_end
+ble_stop_after_end
+```
+
+Each snapshot includes `free_heap`, `heap_min_free`, `heap_max_alloc`, and
+`uptime_ms`. Use a fresh boot, start BLE HID, complete pairing, exercise a key
+report, and stop BLE. The profile is not a release artifact and must not be
+distributed.
+
 ---
 
 ## Features
@@ -83,8 +196,8 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 |---|---|---|
 | Wi-Fi Scan | All (C5: 2.4/5 GHz) | AP scan with SSID, BSSID, channel, RSSI, and security type; C5 scans use dual-band AUTO mode plus explicit 2.4/5 GHz channel bitmaps, with passive timing for 5 GHz scans. |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
-| Nrugochi capture support | All | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry |
-| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
+| Nrugochi capture support | C3, C5, S3, classic ESP32 | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry. Disabled on ESP32-S2 for release memory/profile reasons. |
+| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s3-psram`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, capture-preserving `DEAUTH_BURST` retries, and firmware-native `DEAUTH_MULTI` with per-target channel scheduling and aggregate/per-target counters. Advertises `deauth_multi`. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | All | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie` on all ESP32 targets. |
@@ -94,7 +207,7 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Client Detector | All | Passive probe/assoc/reassoc/auth client detection with async events; active mode reuses deauth |
 | Hidden AP Revealer | All | Hidden AP detection, probe-request candidates, association-based SSID resolution, and optional deauth reconnect trigger |
 | Beacon Spam | All | Inject fake beacon frames, random BSSID, hidden SSID support |
-| Captive Portal | All | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. |
+| Captive Portal | C3, C5, S3, classic ESP32 | SoftAP evil twin with async HTTP server and custom HTML upload. HTML is limited to 24 KiB and must fit within the firmware heap safety margin; Android performs a start-time heap preflight. The AP advertises itself as the DHCP DNS/CP-URI target, answers wildcard DNS, force-serves the landing page for unmatched HTTP routes, and best-effort intercepts plaintext custom-resolver DNS queries. Disabled on ESP32-S2 until the FAT/portal storage path is validated. |
 | BLE HID | C3, C5, S3, DevKit | Bluetooth keyboard and mouse emulation, Ducky Script execution |
 | BLE Scanner | C3, C5, S3, DevKit | BLE advertisement scan with name, RSSI, manufacturer data, service UUIDs, and raw payload |
 | BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
@@ -112,6 +225,39 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 > The regulatory country is configured from Android Settings and enforced by
 > the firmware channel mask. All current ESP32 target builds advertise
 > `wps_pixie`; raw-frame injection uses target-appropriate wrapper flags.
+
+### Captive-portal routing and custom DNS
+
+The portal SoftAP uses `192.168.4.1/24` with the DHCP lease pool starting at
+`192.168.4.2`. Firmware explicitly advertises `192.168.4.1` as the DHCP DNS
+server and enables DHCP option 114 (captive-portal URI) when supported by the
+Arduino/IDF core.
+
+HTTP behavior:
+
+- `/` and `/continue` serve the landing/custom page.
+- `/login` handles POST and GET form submissions.
+- Every other URI is served the landing/custom page directly. It is not
+  dependent on the client following a 3xx redirect.
+
+For clients that ignore DHCP DNS or have a manually configured resolver, the
+firmware starts a promiscuous best-effort DNS hook by default. The app can
+disable it per portal start with `dns_hijack:false`; DHCP DNS, wildcard DNS, and
+forced routes remain active. The DNS-only path does not allocate the PCAP/client
+queues; it uses a fixed stack buffer per intercepted query. Plaintext IPv4 UDP
+DNS queries sent to an external resolver are answered with `192.168.4.1`, and
+the app receives a rate-limited `portal_dns_hijack` event containing current
+`free_heap`, `heap_min_free`, and `heap_max_alloc`. This covers common manual-DNS
+configurations, but it cannot intercept:
+
+- DNS over HTTPS or DNS over TLS;
+- DNS over TCP;
+- IPv6 DNS queries;
+- clients using a hardcoded IP-based connectivity probe.
+
+Those clients may still require a manual portal URL or an OS-specific
+captive-portal bypass. The custom-DNS path needs real-device validation before
+being described as universal.
 
 ### Portal HTML storage
 
@@ -214,7 +360,8 @@ Build a specific board:
 
 ```bash
 pio run -e esp32-c3
-pio run -e esp32-s3
+pio run -e esp32-s3             # S3 without PSRAM
+pio run -e esp32-s3-psram       # S3 with 2 MB QSPI PSRAM
 pio run -e esp32-s2
 pio run -e esp32-devkit
 ```
@@ -222,8 +369,56 @@ pio run -e esp32-devkit
 Build all targets:
 
 ```bash
-pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s2 -e esp32-devkit
+pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s3-psram \
+  -e esp32-s2 -e esp32-devkit
 ```
+
+Firmware library dependencies are pinned to exact tested versions in
+`platformio.ini` for reproducible release builds.
+
+### PSRAM use
+
+The `esp32-s3-psram` profile targets boards such as the ESP32-S3 DevKitC-1
+N4R2: 4 MB flash plus 2 MB QSPI PSRAM. PSRAM is detected at runtime and reported
+through `STATUS.psram_total` / `STATUS.psram_free`; `STATUS.features` includes
+`psram` when present. The no-PSRAM `esp32-s3` profile remains separate.
+
+PSRAM is currently used opportunistically for large non-DMA buffers. The
+packet-sniffer frame and client-event queues are allocated with
+`heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` when PSRAM is
+available, with an internal-RAM fallback on boards without PSRAM. This keeps
+roughly 11 KiB of per-sniff-session queue storage out of internal SRAM on PSRAM
+boards.
+
+PSRAM cannot replace internal SRAM for all uses. WiFi/BLE DMA buffers, interrupt
+handlers, critical stacks, and many lwIP/AsyncTCP allocations must remain in
+internal RAM. Future candidates for PSRAM include large scan/WPS caches and
+non-DMA protocol buffers, but each must be measured for performance and cache
+safety.
+
+### Release logging
+
+Release builds compile out raw serial debug output by default:
+
+- NRSuite modules use `NRSUITE_DEBUG_*` from `src/NrDebugLog.h`, controlled by
+  `NRSUITE_DEBUG_SERIAL` (default `0`).
+- The Hijel BLE HID library logs only when compiled with
+  `HIJEL_HID_ENABLE_LOGGING=1` (default `0`).
+- ESP-IDF core logging is kept low with `CORE_DEBUG_LEVEL=0`.
+
+Raw `Serial` output must stay disabled on UART-only targets because `Serial` is
+also the NRSuite protocol transport. To enable module debug logs for a local
+diagnostic build:
+
+```bash
+PLATFORMIO_BUILD_FLAGS="-DNRSUITE_DEBUG_SERIAL=1 -DHIJEL_HID_ENABLE_LOGGING=1" \
+  pio run -e esp32-devkit
+```
+
+These switches primarily reduce flash/string and stack usage; they do not
+reclaim large amounts of heap. The firmware's static RAM usage is reported by
+the linker from `.dram0.data + .dram0.bss`, while runtime free heap comes from
+`heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`.
 
 ### LD2450 standalone serial bring-up
 
@@ -240,6 +435,26 @@ That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
 ---
 
 ## Flashing
+
+### Flash all connected boards through a hub
+
+The helper script probes every detected serial port with `esptool chip-id`,
+chooses the matching PlatformIO environment, uploads the current build, and
+skips ports that do not respond as an ESP32:
+
+```bash
+./tools/flash_all_boards.sh
+```
+
+You can also provide explicit ports:
+
+```bash
+./tools/flash_all_boards.sh /dev/ttyUSB0 /dev/ttyACM0
+```
+
+Requirements: `jq`, a working `.pio/penv`, and one serial port per physical board.
+If a board exposes both UART and native USB simultaneously, either pass one port
+explicitly or expect the same firmware to be uploaded once through each port.
 
 ### Option A: Flash from the NRSuite Android app (recommended)
 
@@ -342,7 +557,7 @@ Features are conditionally compiled based on the target board. Key flags set in 
 | `ENABLE_BLE_HID` | C3, S3, DevKit | Enables BLE keyboard and mouse HID |
 | `MSC_SUPPORTED` | S2, S3 | Enables USB mass storage |
 | `HID_SUPPORTED` | S2, S3 | Enables USB HID BadUSB |
-| `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3 | Native USB CDC without external UART |
+| `ARDUINO_USB_CDC_ON_BOOT` | C3, S2, S3, C5 | Native USB CDC/JTAG support; native-capable builds also listen on UART0 |
 | `CONFIG_ESP_WIFI_ENABLE_SNIFFER` | All | Enables promiscuous mode for packet capture |
 | `WPS_PIXIE_SUPPORTED` | All | Enables the raw WPS Pixie Dust registrar flow and `wps_pixie` capability |
 
@@ -374,7 +589,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-beta.3.1.1 | v1.0.0-beta.3.1.1 | v1.0 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0-beta.3.2.0 | v1.0.0-beta.3.2.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
 

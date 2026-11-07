@@ -22,6 +22,12 @@
 #include "HijelHID_BLEKeyboard.h"
 #include <stdarg.h>
 
+// Release builds compile out the library's Serial logging helpers by default.
+// Override with -DHIJEL_HID_ENABLE_LOGGING=1 when debugging BLE HID locally.
+#ifndef HIJEL_HID_ENABLE_LOGGING
+#define HIJEL_HID_ENABLE_LOGGING 0
+#endif
+
 // ─── HID Report Descriptor ────────────────────────────────────────────────
 //
 // Two top-level collections:
@@ -271,13 +277,13 @@ void HijelHID_BLEKeyboard::_idleTimerCallback(TimerHandle_t xTimer) {
     // will send a silent zero-report to absorb the drop before the real report.
     self->_reportPrimingNeeded   = true;
 
+    #if HIJEL_HID_ENABLE_LOGGING
     // Serial.print() is safe from the FreeRTOS timer daemon task on ESP32 —
     // it uses an internal UART mutex and does not touch the NimBLE stack.
-    // If Serial has not been initialised the bytes are silently dropped,
-    // consistent with all other logging in the library.
     if (self->_logLevel >= HIDLogLevel::Normal) {
         Serial.println("[HijelHID] Radio idle (slave latency applied, ~1.6Hz effective).");
     }
+    #endif
 }
 
 // ─── Constructor ──────────────────────────────────────────────────────────
@@ -368,6 +374,8 @@ void HijelHID_BLEKeyboard::setDebugLevel(HIDLogLevel level) {
     _logLevel = level;
 }
 
+#if HIJEL_HID_ENABLE_LOGGING
+
 void HijelHID_BLEKeyboard::_logN(const char* msg) {
     if (_logLevel >= HIDLogLevel::Normal) {
         Serial.print("[HijelHID] ");
@@ -406,6 +414,15 @@ void HijelHID_BLEKeyboard::_logVf(const char* fmt, ...) {
     }
 }
 
+#else
+
+void HijelHID_BLEKeyboard::_logN(const char*) {}
+void HijelHID_BLEKeyboard::_logNf(const char*, ...) {}
+void HijelHID_BLEKeyboard::_logV(const char*) {}
+void HijelHID_BLEKeyboard::_logVf(const char*, ...) {}
+
+#endif
+
 // ─── begin() ──────────────────────────────────────────────────────────────
 
 void HijelHID_BLEKeyboard::begin() {
@@ -420,7 +437,8 @@ void HijelHID_BLEKeyboard::begin() {
         return;
     }
 
-    // Print any deferred constructor warnings now that Serial is running
+    #if HIJEL_HID_ENABLE_LOGGING
+    // Print any deferred constructor warnings now that Serial is running.
     if (_nameTruncated) {
         Serial.printf("[HijelHID] WARNING: Device name too long, truncated to %d chars: \"%s\"\n",
                       HID_MAX_DEVICE_NAME_LEN, _deviceName.c_str());
@@ -433,6 +451,7 @@ void HijelHID_BLEKeyboard::begin() {
         Serial.printf("[HijelHID] WARNING: Battery level out of range (1-100), clamped to %d%%.\n",
                       _batteryLevel);
     }
+    #endif
 
     // ── Restart path: stack is already initialised (after end()) ──────
     if (NimBLEDevice::isInitialized()) {

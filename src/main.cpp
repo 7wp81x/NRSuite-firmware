@@ -1,5 +1,10 @@
 #include <Arduino.h>
+#include "NrDebugLog.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <ArduinoJson.h>
+#include <soc/soc_caps.h>
 #include <esp_wifi.h>
 #include "BridgeProtocol.h"
 #include "sniffer.h"
@@ -16,10 +21,15 @@
 #include "wps_pixie.h"
 #include "wps_lock_detector.h"
 #include "wps_attempt_detector.h"
+#include "scan_results.h"
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-beta.3.1.1"
+#define FW_VERSION "1.0.0-beta.3.2.0"
+
+#ifndef NRSUITE_ENABLE_NRUGOCHI
+#define NRSUITE_ENABLE_NRUGOCHI 1
+#endif
 
 #ifndef LD2450_BOOT_START
 #define LD2450_BOOT_START 0
@@ -33,6 +43,12 @@
 #include "ble_scanner.h"
 #include "ble_profile.h"
 #include "ble_pin_bruteforce.h"
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32)
+extern "C" uint8_t temprature_sens_read();
+#elif defined(SOC_TEMP_SENSOR_SUPPORTED)
+#include "driver/temperature_sensor.h"
 #endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -61,9 +77,25 @@
     #define CHIP_NAME "ESP32"
 #endif
 
-BridgeProtocol proto(Serial);
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || \
+    defined(CONFIG_IDF_TARGET_ESP32S3) || \
+    defined(CONFIG_IDF_TARGET_ESP32C3) || \
+    defined(CONFIG_IDF_TARGET_ESP32C5) || \
+    defined(CONFIG_IDF_TARGET_ESP32C6)
+    #define NRSUITE_HAS_NATIVE_USB 1
+#else
+    #define NRSUITE_HAS_NATIVE_USB 0
+#endif
+
+#if NRSUITE_HAS_NATIVE_USB
+BridgeProtocol proto(Serial, "usb_cdc");
+#else
+BridgeProtocol proto(Serial, "uart0");
+#endif
 Sniffer        sniffer;
+#if NRSUITE_ENABLE_PORTAL
 PortalManager  portal;
+#endif
 BeaconSpammer  beacon;
 DeauthDetector deauthDetector;
 HiddenApDetector hiddenApDetector;
@@ -74,6 +106,8 @@ Pn532Nfc       pn532Nfc;
 WpsPixieManager wpsPixie;
 WpsLockDetector wpsLockDetector;
 WpsAttemptDetector wpsAttemptDetector;
+ScanResultStore scanResults;
+static uint32_t g_nextScanId = 1;
 #ifdef ENABLE_BLE_HID
 BleScanner bleScanner;
 BleProfile bleProfile;
@@ -100,8 +134,61 @@ static String getDeviceId() {
     return cached;
 }
 
+// ── Internal chip temperature ────────────────────────────────────────────────
+#if defined(CONFIG_IDF_TARGET_ESP32)
+static bool readChipTemperatureC(float& outCelsius) {
+    // Classic ESP32 has an internal sensor but the current Arduino/IDF target
+    // does not link the official temperature-sensor driver. This ROM-backed
+    // value is best-effort only.
+    const float celsius = (temprature_sens_read() - 32.0f) / 1.8f;
+    if (!std::isfinite(celsius) || celsius < -40.0f || celsius > 125.0f) {
+        return false;
+    }
+    outCelsius = celsius;
+    return true;
+}
+#elif defined(SOC_TEMP_SENSOR_SUPPORTED)
+static temperature_sensor_handle_t gTempSensor = nullptr;
+static bool gTempSensorInitAttempted = false;
+
+static bool readChipTemperatureC(float& outCelsius) {
+    if (!gTempSensorInitAttempted) {
+        gTempSensorInitAttempted = true;
+        temperature_sensor_config_t config =
+            TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        esp_err_t err = temperature_sensor_install(&config, &gTempSensor);
+        if (err != ESP_OK) {
+            // Fall back to the range used by Arduino's temperatureRead().
+            config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
+            err = temperature_sensor_install(&config, &gTempSensor);
+        }
+        if (err == ESP_OK && temperature_sensor_enable(gTempSensor) != ESP_OK) {
+            temperature_sensor_uninstall(gTempSensor);
+            gTempSensor = nullptr;
+        }
+    }
+    if (gTempSensor == nullptr) return false;
+
+    float celsius = NAN;
+    if (temperature_sensor_get_celsius(gTempSensor, &celsius) != ESP_OK) {
+        return false;
+    }
+    if (!std::isfinite(celsius) || celsius < -40.0f || celsius > 125.0f) {
+        return false;
+    }
+    outCelsius = celsius;
+    return true;
+}
+#else
+static bool readChipTemperatureC(float&) {
+    return false;
+}
+#endif
+
 // ── IDF-level scan ───────────────────────────────────────────────────────────
+#if NRSUITE_ENABLE_PORTAL
 static uint16_t g_lastHtmlSeq = 0xFFFF;
+#endif
 
 
 enum class WifiBandMode : uint8_t {
@@ -244,7 +331,7 @@ static void applyStoredWifiCountry() {
     if (country.length() != 2) country = "CH";
     const esp_err_t err = esp_wifi_set_country_code(country.c_str(), false);
     if (err != ESP_OK) {
-        Serial.printf("WiFi country %s rejected: %s (%d)\n",
+        NRSUITE_DEBUG_PRINTF("WiFi country %s rejected: %s (%d)\n",
                       country.c_str(), esp_err_to_name(err), (int)err);
         esp_wifi_set_country_code("CH", false);
     }
@@ -341,7 +428,7 @@ static int idf_scan_networks(
     (void)proto;
 
     if (g_wifiScanInProgress) {
-        Serial.println("SCAN_WIFI: rejected because another scan is already in progress");
+        NRSUITE_DEBUG_PRINTLN("SCAN_WIFI: rejected because another scan is already in progress");
         return -2;
     }
     g_wifiScanInProgress = true;
@@ -352,7 +439,7 @@ static int idf_scan_networks(
         // bitmap below restricts the scan to the requested band.
         const esp_err_t bandErr = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
         if (bandErr != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: failed to enable dual-band mode: %s (%d)\n",
                 esp_err_to_name(bandErr),
                 (int)bandErr
@@ -367,7 +454,7 @@ static int idf_scan_networks(
     const uint32_t sinceLastScanMs = millis() - g_lastWifiScanEndMs;
     if (sinceLastScanMs < settleMs) {
         const uint32_t waitMs = settleMs - sinceLastScanMs;
-        Serial.printf("SCAN_WIFI: settling for %lu ms before scan\n",
+        NRSUITE_DEBUG_PRINTF("SCAN_WIFI: settling for %lu ms before scan\n",
                       (unsigned long)waitMs);
         delay(waitMs);
     }
@@ -405,7 +492,7 @@ static int idf_scan_networks(
     cfg.channel_bitmap.ghz_2_channels = bitmap2g;
     cfg.channel_bitmap.ghz_5_channels = bitmap5g;
 
-    Serial.printf(
+    NRSUITE_DEBUG_PRINTF(
         "SCAN_WIFI: band=%s bitmap2g=0x%04X bitmap5g=0x%08X type=%s "
         "settle_ms=%lu dwell_ms=%u active=%u-%u passive=%u\n",
         wifiBandModeName(bandMode),
@@ -425,11 +512,11 @@ static int idf_scan_networks(
         delay(50);
 
         const uint32_t startedAt = millis();
-        Serial.printf("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("SCAN_WIFI: esp_wifi_scan_start attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)WIFI_SCAN_MAX_ATTEMPTS);
         esp_err_t err = esp_wifi_scan_start(&cfg, true);
         if (err != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: esp_wifi_scan_start attempt %u failed: %s (%d)\n",
                 (unsigned)attempt,
                 esp_err_to_name(err),
@@ -448,7 +535,7 @@ static int idf_scan_networks(
         uint16_t count = 0;
         err = esp_wifi_scan_get_ap_num(&count);
         if (err != ESP_OK) {
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "SCAN_WIFI: esp_wifi_scan_get_ap_num attempt %u failed: %s (%d)\n",
                 (unsigned)attempt,
                 esp_err_to_name(err),
@@ -464,7 +551,7 @@ static int idf_scan_networks(
         }
 
         const bool lowResult = scanResultLooksLow(count);
-        Serial.printf(
+        NRSUITE_DEBUG_PRINTF(
             "SCAN_WIFI: attempt %u complete in %lu ms, raw_count=%u "
             "last_good=%u low_result=%s\n",
             (unsigned)attempt,
@@ -475,7 +562,7 @@ static int idf_scan_networks(
         );
 
         if (lowResult && attempt < WIFI_SCAN_MAX_ATTEMPTS) {
-            Serial.println(
+            NRSUITE_DEBUG_PRINTLN(
                 "SCAN_WIFI: empty/low result; retrying after settle"
             );
             esp_wifi_scan_stop();
@@ -805,7 +892,7 @@ static void deauthMultiTaskFn(void*) {
                 target.requested += attempted;
                 target.failed += attempted;
                 gDeauthMultiFailed += attempted;
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
                     gDeauthMultiCurrentBssid,
                     target.channel,
@@ -894,7 +981,7 @@ static void runDeauthMultiBurst() {
             target.requested += gDeauthMultiCountPerTarget;
             target.failed += gDeauthMultiCountPerTarget;
             gDeauthMultiFailed += gDeauthMultiCountPerTarget;
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "DEAUTH_MULTI: target %s channel %u setup failed: %s\n",
                 gDeauthMultiCurrentBssid,
                 target.channel,
@@ -946,7 +1033,9 @@ static void stopRadioModules() {
     deauthDetector.stop();
     hiddenApDetector.stop();
     beacon.stop();
+    #if NRSUITE_ENABLE_PORTAL
     portal.stop();
+    #endif
     wpsPixie.stop();
     wpsAttemptDetector.stop();
     esp_wifi_set_promiscuous(false);
@@ -979,6 +1068,21 @@ static void radioIdle() {
     #endif
     vTaskDelay(pdMS_TO_TICKS(80));
 }
+
+#if defined(ENABLE_BLE_HID) && defined(NRSUITE_BLE_HEAP_DIAGNOSTIC)
+// Diagnostic-only heap snapshots. They use the existing "mem" event so the
+// Android app forwards them to logcat under NRSuiteFirmwareMem without adding
+// another release protocol event.
+static void sendBleHeapDiagnostic(const char* stage) {
+    JsonDocument ev;
+    ev["stage"] = stage;
+    ev["uptime_ms"] = millis();
+    ev["free_heap"] = ESP.getFreeHeap();
+    ev["heap_min_free"] = ESP.getMinFreeHeap();
+    ev["heap_max_alloc"] = ESP.getMaxAllocHeap();
+    proto.sendEvent("mem", ev);
+}
+#endif
 
 // ── LD2450 command/event layer ────────────────────────────────────────────────
 static constexpr uint32_t LD2450_BAUD = 256000;
@@ -1222,7 +1326,7 @@ static void sendRfidStatusResp(
     proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 }
 
-void handleCmd(uint8_t id, JsonDocument& doc) {
+void handleCmdImpl(uint8_t id, JsonDocument& doc) {
     const char* cmd = doc["cmd"] | "";
     if (cmd[0] == '\0') {
         proto.sendResp(id, false, "missing cmd");
@@ -1240,7 +1344,25 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
 
     // ── PING ──────────────────────────────────────────────────────────────
     if (strcmp(cmd, "PING") == 0) {
-        proto.sendResp(id, true, "pong");
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["msg"] = "pong";
+        resp["transport"] = proto.activeTransportName();
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+    }
+
+    // ── EXPLICIT DEVICE REBOOT ────────────────────────────────────────────
+    else if (strcmp(cmd, "REBOOT") == 0) {
+        // Reboot is never automatic. Acknowledge first, drain the active
+        // transport, and then restart so the app can surface deterministic
+        // feedback before USB re-enumerates.
+        proto.sendResp(id, true, "rebooting");
+        proto.flushActive();
+        delay(250);
+        ESP.restart();
+        return;
     }
 
     // ── WPS PIXIE DUST ────────────────────────────────────────────────────
@@ -1333,14 +1455,35 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
         uint16_t dwellMs = doc["args"]["dwell_ms"] | 120;
         dwellMs = (uint16_t)constrain(dwellMs, 60, 1000);
+        const bool pullResults = doc["args"]["pull_results"] | false;
+        const bool includeNonWps = doc["args"]["include_non_wps"] | false;
+        uint32_t scanId = 0;
+        if (pullResults) {
+            scanId = g_nextScanId++;
+            scanResults.begin(ScanResultStore::Kind::Wps, scanId);
+        }
         radioIdle();
-        const int count = wpsLockDetector.scan(
+        const int scannedCount = wpsLockDetector.scan(
             bandMode != WifiBandMode::BAND_2G,
-            dwellMs
+            dwellMs,
+            !pullResults,
+            includeNonWps
         );
+        int reportedCount = scannedCount;
+        if (pullResults) {
+            wpsLockDetector.appendResults(scanResults);
+            reportedCount = (int)scanResults.count();
+        }
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = count;
+        resp["count"] = reportedCount;
+        resp["scanned"] = scannedCount;
+        if (pullResults) {
+            resp["scan_id"] = scanId;
+            resp["kind"] = "wps";
+            resp["include_non_wps"] = includeNonWps;
+            resp["truncated"] = scannedCount > reportedCount;
+        }
         String json;
         serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
@@ -1481,9 +1624,24 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         resp["ok"]       = true;
         resp["uptime"]   = millis();
         resp["heap"]     = ESP.getFreeHeap();
+        resp["heap_total"]     = ESP.getHeapSize();
+        resp["heap_used"]      = ESP.getHeapSize() - ESP.getFreeHeap();
+        resp["heap_min_free"]  = ESP.getMinFreeHeap();
+        resp["heap_max_alloc"] = ESP.getMaxAllocHeap();
+        resp["psram_total"]    = ESP.getPsramSize();
+        resp["psram_free"]     = ESP.getFreePsram();
+        resp["chip_cores"]     = ESP.getChipCores();
+        resp["cpu_mhz"]        = ESP.getCpuFreqMHz();
+        resp["flash_size"]     = ESP.getFlashChipSize();
+        resp["sdk"]            = ESP.getSdkVersion();
+        float chipTempC = 0.0f;
+        if (readChipTemperatureC(chipTempC)) {
+            resp["temp_c"] = roundf(chipTempC * 10.0f) / 10.0f;
+        }
+        resp["transport"] = proto.activeTransportName();
         resp["chip"]      = CHIP_NAME;
         resp["proto"]       = 1;
-        resp["proto_minor"] = 1;
+        resp["proto_minor"] = 2;
         resp["fw"]          = FW_VERSION;
         resp["device_id"] = getDeviceId();
         char countryCode[4] = {0};
@@ -1498,19 +1656,29 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         #if defined(CONFIG_IDF_TARGET_ESP32C5)
             features.add("wifi_5ghz");
         #endif
+        if (ESP.getPsramSize() > 0) {
+            features.add("psram");
+        }
         features.add("sniff");
+        #if NRSUITE_ENABLE_NRUGOCHI
         features.add("auto_handshake");
         features.add("nrugochi");
+        #endif
         features.add("client_detect");
         features.add("deauth");
         features.add("deauth_multi");
         features.add("deauth_detect");
         features.add("beacon");
+        #if NRSUITE_ENABLE_PORTAL
         features.add("portal");
         features.add("portal_html_offset");
         features.add("html_diag");
+        #endif
+        features.add("reboot");
         features.add("stop_all");
         features.add("wps");
+        features.add("scan_results_pull");
+        features.add("temp_sensor");
         features.add("wps_lock_detect");
         features.add("wps_attempt_detect");
         #if WPS_PIXIE_SUPPORTED
@@ -1552,7 +1720,11 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         if (sniffer.active()) {
             resp["channel"] = sniffer.channel();
         }
+        #if NRSUITE_ENABLE_PORTAL
         resp["portal"]   = portal.isRunning();
+        #else
+        resp["portal"]   = false;
+        #endif
         resp["beacon"]   = beacon.active();
         resp["deauth_detector"] = deauthDetector.active();
         resp["hidden_ap"] = hiddenApDetector.active();
@@ -1971,7 +2143,15 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             return;
         }
 
+        const bool pullResults = doc["args"]["pull_results"] | false;
+        uint32_t scanId = 0;
+        if (pullResults) {
+            scanId = g_nextScanId++;
+            scanResults.begin(ScanResultStore::Kind::Wifi, scanId);
+        }
+
         int emittedCount = 0;
+        int storedCount = 0;
         if (n > 0) {
             uint16_t count = (uint16_t)n;
             wifi_ap_record_t* records = (wifi_ap_record_t*)malloc(
@@ -2000,19 +2180,43 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
                              records[i].bssid[2], records[i].bssid[3],
                              records[i].bssid[4], records[i].bssid[5]);
 
-                    JsonDocument ev;
-                    ev["ssid"]     = (char*)records[i].ssid;
-                    ev["bssid"]    = bssid_str;
-                    ev["channel"]  = records[i].primary;
-                    ev["rssi"]     = records[i].rssi;
-                    ev["security"] = authModeStr(records[i].authmode);
-                    ev["wps"]      = (bool)records[i].wps;
-                    ev["band"]     = wifiBandForChannel(records[i].primary);
-                    proto.sendEvent("scan_ap", ev);
-                    emittedCount++;
+                    if (pullResults) {
+                        ScanResultStore::Record result;
+                        memcpy(result.ssid, records[i].ssid, sizeof(result.ssid));
+                        result.ssid[sizeof(result.ssid) - 1] = '\0';
+                        memcpy(result.bssid, records[i].bssid, sizeof(result.bssid));
+                        result.channel = records[i].primary;
+                        result.rssi = records[i].rssi;
+                        strncpy(
+                            result.security,
+                            authModeStr(records[i].authmode),
+                            sizeof(result.security) - 1
+                        );
+                        result.security[sizeof(result.security) - 1] = '\0';
+                        result.wps = (bool)records[i].wps;
+                        result.band = records[i].primary >= 36 ? 1 : 0;
+                        if (scanResults.add(result)) storedCount++;
+                    } else {
+                        JsonDocument ev;
+                        ev["ssid"]     = (char*)records[i].ssid;
+                        ev["bssid"]    = bssid_str;
+                        ev["channel"]  = records[i].primary;
+                        ev["rssi"]     = records[i].rssi;
+                        ev["security"] = authModeStr(records[i].authmode);
+                        ev["wps"]      = (bool)records[i].wps;
+                        ev["band"]     = wifiBandForChannel(records[i].primary);
+                        proto.sendEvent("scan_ap", ev);
+                        // Scan bursts can contain many AP frames back-to-back. On
+                        // UART bridges a full TX queue was observed to corrupt or
+                        // drop event frames, so drain each frame before queueing
+                        // the next one.
+                        proto.flushActive();
+                        delay(2);
+                        emittedCount++;
+                    }
                 }
             } else {
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "SCAN_WIFI: esp_wifi_scan_get_ap_records failed: %s (%d), records=%s\n",
                     esp_err_to_name(recordsErr),
                     (int)recordsErr,
@@ -2023,19 +2227,26 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
 
         finishWifiScan(true);
-        Serial.printf(
-            "SCAN_WIFI: response raw_count=%d emitted_count=%d band=%s\n",
+        const int reportedCount = pullResults ? storedCount : emittedCount;
+        NRSUITE_DEBUG_PRINTF(
+            "SCAN_WIFI: response raw_count=%d reported_count=%d pull=%s band=%s\n",
             n,
-            emittedCount,
+            reportedCount,
+            pullResults ? "yes" : "no",
             wifiBandModeName(bandMode)
         );
 
         JsonDocument resp;
         resp["ok"] = true;
-        resp["count"] = emittedCount;
+        resp["count"] = reportedCount;
         resp["scanned"] = n;
         resp["band"] = wifiBandModeName(bandMode);
         resp["dwell_ms"] = dwellMs;
+        if (pullResults) {
+            resp["scan_id"] = scanId;
+            resp["kind"] = "wifi";
+            resp["truncated"] = n > reportedCount;
+        }
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
 
@@ -2044,6 +2255,51 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             if (wasHopping) sniffer.startHop(300);
             else sniffer.startFixed(prevChannel, isWifi5GhzEnabled());
         }
+    }
+
+    // ── SCAN_RESULTS ──────────────────────────────────────────────────────
+    // Pull-based retrieval for SCAN_WIFI/WPS_LOCK_SCAN snapshots. Each chunk
+    // is small, offset-addressed, and carries a CRC over the deterministic
+    // canonical result fields so the app can retry corrupt/missing chunks.
+    else if (strcmp(cmd, "SCAN_RESULTS") == 0) {
+        const uint32_t scanId = doc["args"]["scan_id"] | 0;
+        const size_t offset = doc["args"]["offset"] | 0;
+        uint16_t limit = doc["args"]["limit"] | ScanResultStore::kDefaultChunkLimit;
+        if (limit == 0) limit = ScanResultStore::kDefaultChunkLimit;
+        if (limit > ScanResultStore::kMaxChunkLimit) {
+            limit = ScanResultStore::kMaxChunkLimit;
+        }
+
+        if (scanId == 0 || !scanResults.matches(scanId)) {
+            proto.sendResp(id, false, "scan result snapshot not found");
+            return;
+        }
+        if (offset > scanResults.count()) {
+            proto.sendResp(id, false, "scan result offset out of range");
+            return;
+        }
+
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["scan_id"] = scanId;
+        resp["kind"] = scanResults.kindName();
+        resp["offset"] = (uint32_t)offset;
+        resp["limit"] = limit;
+        resp["total"] = (uint32_t)scanResults.count();
+        resp["crc32"] = scanResults.crc32ForRange(offset, limit);
+        JsonArray results = resp["results"].to<JsonArray>();
+        size_t nextOffset = offset;
+        const size_t chunkCount = scanResults.appendResults(
+            results,
+            offset,
+            limit,
+            nextOffset
+        );
+        resp["count"] = (uint32_t)chunkCount;
+        resp["next_offset"] = (uint32_t)nextOffset;
+        String json;
+        serializeJson(resp, json);
+        proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
     // ── DEAUTH_MULTI ─────────────────────────────────────────────────────
@@ -2686,6 +2942,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
 
+#if NRSUITE_ENABLE_PORTAL
     // ── CAPTIVE PORTAL ────────────────────────────────────────────────────
     else if (strcmp(cmd, "START_PORTAL") == 0) {
         radioIdle();  // stop sniff / beacon / prior portal before starting
@@ -2727,6 +2984,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         }
         const char* bssidStr = doc["args"]["bssid"] | "";
         const bool showNotice = doc["args"]["show_notice"] | true;
+        const bool dnsHijackEnabled = doc["args"]["dns_hijack"] | true;
 
         uint8_t targetBssid[6] = {0};
         bool hasTarget = parseMac(bssidStr, targetBssid);
@@ -2737,7 +2995,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
             channel,
             hasTarget ? targetBssid : nullptr,
             showNotice,
-            &portalError
+            &portalError,
+            dnsHijackEnabled
         );
         if (started) {
             proto.sendResp(id, true, "portal started");
@@ -2855,6 +3114,7 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }
+#endif
     #ifdef ENABLE_BLE_HID
     else if (strcmp(cmd, "BLE_SCAN_START") == 0) {
         mesh.stop();
@@ -2905,9 +3165,61 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         } else if (bleProfile.active()) {
             proto.sendResp(id, false, "stop BLE profile before starting BLE HID");
         } else {
+            // NimBLE + HID needs roughly 65-70 KB on C3-class targets. Starting
+            // with less has been observed to exhaust the heap and reset the
+            // USB device. Refuse before allocation instead of crashing.
+            #ifdef NRSUITE_BLE_HID_MIN_FREE_HEAP_BYTES
+            constexpr uint32_t BLE_HID_MIN_FREE_HEAP = NRSUITE_BLE_HID_MIN_FREE_HEAP_BYTES;
+            #else
+            constexpr uint32_t BLE_HID_MIN_FREE_HEAP = 90 * 1024;
+            #endif
+            #ifdef NRSUITE_BLE_HID_MIN_LARGEST_BLOCK_BYTES
+            constexpr uint32_t BLE_HID_MIN_LARGEST_BLOCK = NRSUITE_BLE_HID_MIN_LARGEST_BLOCK_BYTES;
+            #else
+            constexpr uint32_t BLE_HID_MIN_LARGEST_BLOCK = 48 * 1024;
+            #endif
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_before_guard");
+            #endif
+            const uint32_t freeHeap = ESP.getFreeHeap();
+            const uint32_t largestBlock = ESP.getMaxAllocHeap();
+            if (!BleHid::isInitialized() &&
+                (freeHeap < BLE_HID_MIN_FREE_HEAP ||
+                 largestBlock < BLE_HID_MIN_LARGEST_BLOCK)) {
+                char message[96];
+                snprintf(
+                    message,
+                    sizeof(message),
+                    "insufficient heap for BLE HID (free=%lu largest=%lu)",
+                    static_cast<unsigned long>(freeHeap),
+                    static_cast<unsigned long>(largestBlock));
+                JsonDocument resp;
+                resp["ok"] = false;
+                resp["error"] = "insufficient_heap_for_ble_hid";
+                resp["msg"] = message;
+                resp["heap"] = freeHeap;
+                resp["heap_max_alloc"] = largestBlock;
+                resp["required_heap"] = BLE_HID_MIN_FREE_HEAP;
+                resp["required_largest_block"] = BLE_HID_MIN_LARGEST_BLOCK;
+                resp["transport"] = proto.activeTransportName();
+                String json;
+                serializeJson(resp, json);
+                proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
+                return;
+            }
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_before_radio_idle");
+            #endif
             radioIdle();
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_after_radio_idle");
+            sendBleHeapDiagnostic("ble_start_before_begin");
+            #endif
             const char* name = doc["args"]["name"] | "NRSuite_Keyboard";
             BleHid::begin(String(name));
+            #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+            sendBleHeapDiagnostic("ble_start_after_begin");
+            #endif
             proto.sendResp(id, true, "ble started");
         }
     }
@@ -2916,6 +3228,8 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
         JsonDocument resp;
         resp["ok"]          = true; 
         resp["connected"]   = BleHid::isConnected();
+        resp["linked"]      = BleHid::isLinkConnected();
+        resp["active"]      = BleHid::isSessionActive();
         resp["advertising"] = BleHid::isAdvertising();   // ← NEW
         resp["peer"]        = BleHid::peerAddress();
         String json; serializeJson(resp, json);
@@ -2923,7 +3237,13 @@ void handleCmd(uint8_t id, JsonDocument& doc) {
     }
 
     else if (strcmp(cmd, "BLE_STOP") == 0) {
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        sendBleHeapDiagnostic("ble_stop_before_end");
+        #endif
         BleHid::end();
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        sendBleHeapDiagnostic("ble_stop_after_end");
+        #endif
         blePinBruteforce.onBleEnded();
         proto.sendResp(id, true, "ble stopped");
     }
@@ -3552,15 +3872,71 @@ void handleAck(uint32_t chunk_index) {
     sniffer.onAck(chunk_index);
 }
 
+static bool shouldLogMemoryCommand(const char* cmd) {
+    if (!cmd || cmd[0] == '\0') return false;
+    return strcmp(cmd, "SCAN_WIFI") == 0 ||
+           strcmp(cmd, "DEAUTH") == 0 ||
+           strcmp(cmd, "DEAUTH_BURST") == 0 ||
+           strcmp(cmd, "WPS_PIXIE_ATTEMPT") == 0 ||
+           strstr(cmd, "START") != nullptr ||
+           strstr(cmd, "STOP") != nullptr;
+}
+
+static void handleCmdWithMemoryLog(uint8_t id, JsonDocument& doc) {
+    const char* cmd = doc["cmd"] | "";
+    if (!shouldLogMemoryCommand(cmd)) {
+        handleCmdImpl(id, doc);
+        return;
+    }
+
+    const uint32_t startedMs = millis();
+    const uint32_t freeBefore = ESP.getFreeHeap();
+    handleCmdImpl(id, doc);
+    const uint32_t endedMs = millis();
+
+    // Keep diagnostics out of the UART protocol stream. On UART-only builds
+    // Serial is the protocol transport, so a raw printf would corrupt frames.
+    JsonDocument mem;
+    mem["cmd"] = cmd[0] ? cmd : "unknown";
+    mem["start_ms"] = startedMs;
+    mem["end_ms"] = endedMs;
+    mem["duration_ms"] = endedMs - startedMs;
+    mem["free_before"] = freeBefore;
+    mem["free_after"] = ESP.getFreeHeap();
+    mem["min_free"] = ESP.getMinFreeHeap();
+    mem["largest"] = ESP.getMaxAllocHeap();
+    mem["psram_total"] = ESP.getPsramSize();
+    mem["psram_free"] = ESP.getFreePsram();
+    mem["transport"] = proto.activeTransportName();
+    proto.sendEvent("mem", mem);
+}
+
 void sendHeartbeat() {
     static uint32_t last = 0;
     if (millis() - last < 5000) return;
     last = millis();
 
-    JsonDocument doc;
-    doc["uptime"] = millis();
-    doc["heap"]   = ESP.getFreeHeap();
-    proto.sendEvent("heartbeat", doc);
+    // Keep the heartbeat independent of ArduinoJson dynamic allocation. On S2
+    // the JSON document path has been observed producing an empty object,
+    // while the protocol frame itself remained valid. A fixed stack buffer
+    // guarantees the monitor always receives a readable heartbeat payload.
+    char payload[128];
+    const int length = std::snprintf(
+        payload,
+        sizeof(payload),
+        "{\"uptime\":%lu,\"heap\":%lu,\"type\":\"heartbeat\",\"transport\":\"%s\"}",
+        static_cast<unsigned long>(millis()),
+        static_cast<unsigned long>(ESP.getFreeHeap()),
+        proto.activeTransportName());
+    if (length <= 0) return;
+    const size_t payloadLength = std::min<size_t>(
+        static_cast<size_t>(length),
+        sizeof(payload) - 1);
+    proto.sendRaw(
+        TYPE_EVENT,
+        0,
+        reinterpret_cast<const uint8_t*>(payload),
+        static_cast<uint32_t>(payloadLength));
 }
 
 // ── Setup ──────────────────────────────────────────────────────────────────
@@ -3591,8 +3967,18 @@ void setup() {
         #endif
     #endif
 
+#if NRSUITE_HAS_NATIVE_USB
+    // Native USB CDC/JTAG is the primary protocol transport.
+    Serial.begin(115200);
+    // UART0 is the second protocol transport for devkits that expose a
+    // USB-to-UART bridge alongside the native USB port.
+    Serial0.setRxBufferSize(4096);
+    Serial0.begin(115200);
+    proto.addTransport(Serial0, "uart0");
+#else
     Serial.setRxBufferSize(4096);
     Serial.begin(115200);
+#endif
     delay(150);
 
     loadLd2450Config();
@@ -3637,9 +4023,10 @@ void setup() {
 
     // Initialise subsystems
     proto.begin();
-    proto.onCmd(handleCmd);
+    proto.onCmd(handleCmdWithMemoryLog);
     proto.onAck(handleAck);
 
+    #if NRSUITE_ENABLE_PORTAL
     proto.onHtml([](const uint8_t* data, size_t len) {
         if (len < 3) return;  // need at least seq(2) + isLast(1)
 
@@ -3663,10 +4050,13 @@ void setup() {
         serializeJson(doc, json);
         proto.sendRaw(TYPE_RESP, 0, (const uint8_t*)json.c_str(), json.length());
     });
+    #endif
 
 
     sniffer.begin(proto);
+    #if NRSUITE_ENABLE_PORTAL
     portal.begin(proto);
+    #endif
     beacon.begin(proto);
     deauthDetector.begin(proto);
     hiddenApDetector.begin(proto);
@@ -3681,6 +4071,13 @@ void setup() {
         bleScanner.begin(proto);
         bleProfile.begin(proto);
         blePinBruteforce.begin(proto);
+        #ifdef NRSUITE_BLE_HEAP_DIAGNOSTIC
+        BleHid::setPairingCompleteDiagnosticCallback([](bool success) {
+            sendBleHeapDiagnostic(success
+                ? "ble_pairing_complete"
+                : "ble_pairing_failed");
+        });
+        #endif
     #endif
 
 }
@@ -3692,7 +4089,9 @@ void loop() {
     
     sniffer.processQueue();
     sniffer.handleHop();
+    #if NRSUITE_ENABLE_PORTAL
     portal.update();
+    #endif
     beacon.update();
     deauthDetector.update();
     hiddenApDetector.update();

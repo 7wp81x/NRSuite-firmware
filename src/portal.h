@@ -7,11 +7,16 @@
 #include "BridgeProtocol.h"
 #include "sniffer.h"
 
+#ifndef NRSUITE_ENABLE_PORTAL
+#define NRSUITE_ENABLE_PORTAL 1
+#endif
+
 class PortalManager {
 public:
     void begin(BridgeProtocol& proto);
     bool start(const char* ssid, uint8_t channel, const uint8_t* targetBssid = nullptr,
-               bool showNotice = true, String* error = nullptr);
+               bool showNotice = true, String* error = nullptr,
+               bool dnsHijackEnabled = true);
     void stop();
     bool setHtmlChunk(const uint8_t* data, size_t len, bool isLast = false,
                       size_t offset = 0, bool hasOffset = false);
@@ -32,6 +37,7 @@ private:
     bool _showNotice = true;
     bool _storageMounted = false;
     bool _apStarted = false;
+    bool _snifferStarted = false;
     File _htmlFile;
     uint8_t _targetBssid[6] = {0};
     bool _hasTarget = false;
@@ -54,6 +60,7 @@ private:
                          bool ignoreAttemptArg = false);
     String loadingPlaceholder() const;
     String noticePage() const;
+    void sendLandingResponse(AsyncWebServerRequest* request);
     void sendPortalContent(AsyncWebServerRequest* request);
     bool mountPortalStorage();
     void unmountPortalStorage();
