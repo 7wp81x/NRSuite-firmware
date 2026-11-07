@@ -1,6 +1,7 @@
 # NRSuite Firmware
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-NRSuite--Docs-3DDC84?logo=readthedocs&logoColor=white)](https://7wp81x.github.io/NRSuite-Docs/)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
 [![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.1.2-yellow.svg)](../../releases)
@@ -13,6 +14,9 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
 **Current release line:** `1.0.0-beta.3.1.2`. Mesh support from merged mesh branches is present but experimental.
+
+Full user documentation, supported-board details, and flashing instructions:
+[NRSuite Documentation](https://7wp81x.github.io/NRSuite-Docs/)
 
 ---
 
@@ -34,7 +38,8 @@ Prefer flashing from your phone? Use the built-in flasher in the [NRSuite Androi
 
 - [Quick Start](#quick-start)
 - [Community](#community)
-- [Supported Boards](#supported-boards)
+- [Documentation](https://7wp81x.github.io/NRSuite-Docs/)
+- [Supported Boards](https://7wp81x.github.io/NRSuite-Docs/firmware/supported-boards/)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Building](#building)
@@ -63,15 +68,11 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 
 ## Supported Boards
 
-| Board | MCU | Native USB | BLE | BadUSB / MSC | Environment |
-|---|---|---|---|---|---|
-| ESP32-C3 DevKitM-1 | ESP32-C3 | Yes (CDC) | Yes | No | `esp32-c3` |
-| ESP32-C5 DevKitC-1 | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5` |
-| ESP32-S3 DevKitC-1 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3` |
-| ESP32-S2 Saola-1 | ESP32-S2 | Yes (TinyUSB) | No | Yes | `esp32-s2` |
-| ESP32 DevKit | ESP32 | No (needs CP2102/CH340) | Yes | No | `esp32-devkit` |
+Supported-board details, native USB/UART transport behavior, ESP32-S3 PSRAM,
+ESP32-S2 feature exclusions, and ESP32-C5 BLE HID memory limits are documented
+centrally:
 
-**Recommended board for getting started:** ESP32-C3 DevKitM-1. It has native USB CDC (no external USB-UART chip), BLE, and is the default build target.
+**[Supported Boards](https://7wp81x.github.io/NRSuite-Docs/firmware/supported-boards/)**
 
 ---
 
@@ -241,29 +242,13 @@ That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
 
 ## Flashing
 
-### Option A: Flash from the NRSuite Android app (recommended)
+See the central **[Firmware Flashing guide](https://7wp81x.github.io/NRSuite-Docs/firmware/flashing/)**
+for the recommended Android in-app flasher workflow, target selection, USB-UART
+bridge notes, and manual esptool commands.
 
-The Android app has a built-in ESP32 flasher. Connect your board via USB-OTG and use the flasher screen to upload the latest firmware binary from the [Releases](../../releases) page.
-
-> NRSuite uses **full-image USB reflashing only**. OTA updates are not planned for 4 MB builds.
-
-### Option B: Flash via PlatformIO
-
-```bash
-pio run -e esp32-c3 --target upload
-```
-
-Replace `esp32-c3` with your target environment.
-
-### Option C: Flash via esptool manually
-
-Download the merged binary from [Releases](../../releases) and flash it:
-
-```bash
-esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 beta-nrsuite-esp32c3.bin
-```
-
-> The release binary is a merged flash image (bootloader + partition table + app) produced by `merge_script.py` at build time. Use offset `0x0` when flashing the merged binary.
+All published NRSuite firmware files are merged full-flash images and must be
+written at offset `0x0`. The C5 bootloader is included at `0x2000` inside the
+merged image.
 
 ---
 
@@ -367,6 +352,7 @@ Short version:
 |---|---|
 | [nrsuite-android](https://github.com/7wp81x/nrsuite-android) | Android companion app (Kotlin/Jetpack Compose) |
 | [nrsuite-protocol](https://github.com/7wp81x/nrsuite-protocol) | Wire protocol specification |
+| [NRSuite-Docs](https://github.com/7wp81x/NRSuite-Docs) | User guides, protocol docs, and downloadable resources |
 
 ---
 
