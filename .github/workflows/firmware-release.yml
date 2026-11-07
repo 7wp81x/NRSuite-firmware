@@ -51,7 +51,7 @@ jobs:
           import re
           from pathlib import Path
 
-          tag = os.environ["RELEASE_TAG"]
+          tag = os.environ["RELEASE_TAG"].removeprefix("v")
 
           main_cpp = Path("src/main.cpp")
           text = main_cpp.read_text()
