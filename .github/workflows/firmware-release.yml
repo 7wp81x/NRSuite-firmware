@@ -22,6 +22,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Classify release channel
+        id: release_channel
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          case "$TAG" in
+            *-alpha*) CHANNEL=alpha; PRERELEASE=true ;;
+            *-beta*)  CHANNEL=beta;  PRERELEASE=true ;;
+            *-rc*)    CHANNEL=rc;    PRERELEASE=true ;;
+            *)        CHANNEL=stable; PRERELEASE=false ;;
+          esac
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "ERROR: unsupported release tag: $TAG" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Firmware version=$VERSION channel=$CHANNEL prerelease=$PRERELEASE"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -43,7 +64,7 @@ jobs:
 
       - name: Inject release version into firmware
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.release_channel.outputs.version }}
         run: |
           set -e
           python3 - <<'PY'
@@ -51,18 +72,18 @@ jobs:
           import re
           from pathlib import Path
 
-          tag = os.environ["RELEASE_TAG"].removeprefix("v")
+          version = os.environ["RELEASE_VERSION"]
 
           main_cpp = Path("src/main.cpp")
           text = main_cpp.read_text()
-          text = re.sub(r'#define FW_VERSION .*', f'#define FW_VERSION "{tag}"', text, count=1)
+          text = re.sub(r'#define FW_VERSION .*', f'#define FW_VERSION "{version}"', text, count=1)
           main_cpp.write_text(text)
 
           platformio = Path("platformio.ini")
           text = platformio.read_text()
           text = text.replace(
               '-DGIT_COMMIT_HASH=\'"dev"\'',
-              f'-DGIT_COMMIT_HASH=\'"{tag}"\''
+              f'-DGIT_COMMIT_HASH=\'"{version}"\''
           )
           platformio.write_text(text)
           PY
@@ -74,12 +95,15 @@ jobs:
       - name: Rename binaries with version tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_CHANNEL: ${{ steps.release_channel.outputs.channel }}
         run: |
           set -e
           TAG="$RELEASE_TAG"
-          case "$TAG" in
-            *alpha*|*beta*|*rc*) SRC_DIR=beta-release ;;
-            *) SRC_DIR=release ;;
+          case "$RELEASE_CHANNEL" in
+            alpha|beta) SRC_DIR=beta-release ;;
+            rc)         SRC_DIR=rc-release ;;
+            stable)     SRC_DIR=release ;;
+            *) echo "Unknown release channel: $RELEASE_CHANNEL"; exit 1 ;;
           esac
           [ -d "$SRC_DIR" ] || { echo "Missing source directory: $SRC_DIR"; exit 1; }
 
@@ -108,6 +132,22 @@ jobs:
       contents: write
 
     steps:
+      - name: Classify release channel
+        id: release_channel
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          case "$TAG" in
+            *-alpha*) CHANNEL=alpha; PRERELEASE=true ;;
+            *-beta*)  CHANNEL=beta;  PRERELEASE=true ;;
+            *-rc*)    CHANNEL=rc;    PRERELEASE=true ;;
+            *)        CHANNEL=stable; PRERELEASE=false ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -128,9 +168,11 @@ jobs:
             dist/*.bin
             dist/checksums.txt
           fail_on_unmatched_files: true
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+          prerelease: ${{ steps.release_channel.outputs.prerelease == 'true' }}
           body: |
             ## NRSuite Firmware ${{ github.ref_name }}
+
+            Release channel: `${{ steps.release_channel.outputs.channel }}`
 
             ### Binaries
 
@@ -149,7 +191,8 @@ jobs:
             | ESP32-S2 Saola-1 | `esp32-s2` | `nrsuite-esp32s2-*.bin` |
             | ESP32 DevKit | `esp32-devkit` | `nrsuite-esp32classic-*.bin` |
 
-            > Alpha/beta/RC tags use the same names with a `beta-` prefix.
+            > Alpha/beta tags use a `beta-` asset prefix and RC tags use an
+            > `rc-` asset prefix. Stable tags use the unprefixed `nrsuite-` name.
             > The C5 merged image starts at flash offset `0x0` and contains its
             > bootloader at `0x2000`.
 

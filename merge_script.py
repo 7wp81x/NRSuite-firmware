@@ -20,6 +20,15 @@ BETA_NAME_MAP = {
     "esp32-c5":     "beta-nrsuite-esp32c5.bin",
 }
 
+RC_NAME_MAP = {
+    "esp32-devkit": "rc-nrsuite-esp32classic.bin",
+    "esp32-c3":     "rc-nrsuite-esp32c3.bin",
+    "esp32-s3":     "rc-nrsuite-esp32s3.bin",
+    "esp32-s3-psram": "rc-nrsuite-esp32s3-psram.bin",
+    "esp32-s2":     "rc-nrsuite-esp32s2.bin",
+    "esp32-c5":     "rc-nrsuite-esp32c5.bin",
+}
+
 # Bootloader load offset differs by chip family
 BOOT_OFFSET = {
     "esp32":    "0x1000",  # classic ESP32 - different offset!
@@ -42,14 +51,18 @@ def merge_bin_action(source, target, env):
     project_dir = env.subst("$PROJECT_DIR")
     release_dir = os.path.join(project_dir, "release")
     beta_dir = os.path.join(project_dir, "beta-release")
+    rc_dir = os.path.join(project_dir, "rc-release")
     os.makedirs(release_dir, exist_ok=True)
     os.makedirs(beta_dir, exist_ok=True)
+    os.makedirs(rc_dir, exist_ok=True)
 
     out_name = NAME_MAP.get(pioenv, f"nrsuite-{pioenv}.bin")
     beta_name = BETA_NAME_MAP.get(pioenv, f"beta-nrsuite-{pioenv}.bin")
+    rc_name = RC_NAME_MAP.get(pioenv, f"rc-nrsuite-{pioenv}.bin")
 
     merged = os.path.join(release_dir, out_name)
     merged_beta = os.path.join(beta_dir, beta_name)
+    merged_rc = os.path.join(rc_dir, rc_name)
 
     mcu = board.get("build.mcu", "esp32")
     boot_offset = BOOT_OFFSET.get(mcu, "0x0")
@@ -77,5 +90,11 @@ def merge_bin_action(source, target, env):
         print(f"[merge_script] Copied  -> {merged_beta}")
     except OSError as e:
         print(f"[merge_script] ERROR: failed to copy beta binary for {pioenv}: {e}")
+
+    try:
+        shutil.copyfile(merged, merged_rc)
+        print(f"[merge_script] Copied  -> {merged_rc}")
+    except OSError as e:
+        print(f"[merge_script] ERROR: failed to copy RC binary for {pioenv}: {e}")
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", merge_bin_action)
