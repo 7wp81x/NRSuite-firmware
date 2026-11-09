@@ -2999,11 +2999,20 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             dnsHijackEnabled
         );
         if (started) {
-            proto.sendResp(id, true, "portal started");
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["msg"] = "portal started";
+            resp["capture_active"] = portal.isCaptureActive();
+            resp["capture_target"] = portal.hasCaptureTarget();
+            resp["dns_up"] = portal.isDnsActive();
+            resp["clients"] = portal.stationCount();
+            String json; serializeJson(resp, json);
+            proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
         } else {
+            const bool captureFailure = portalError.indexOf("capture") >= 0;
             JsonDocument resp;
             resp["ok"] = false;
-            resp["error"] = "softap_start_failed";
+            resp["error"] = captureFailure ? "capture_start_failed" : "softap_start_failed";
             resp["msg"] = portalError.length() ? portalError : "softAP failed";
             resp["channel"] = channel;
             appendAllowedWifiChannels(resp);
@@ -3111,6 +3120,10 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         resp["html_size"] = portal.getBufferSize();
         resp["html_expected"] = portal.getExpectedSize();
         resp["html_complete"] = portal.isComplete();
+        resp["capture_active"] = portal.isCaptureActive();
+        resp["capture_target"] = portal.hasCaptureTarget();
+        resp["dns_up"] = portal.isDnsActive();
+        resp["clients"] = portal.stationCount();
         String json; serializeJson(resp, json);
         proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());
     }

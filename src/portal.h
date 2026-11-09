@@ -21,6 +21,10 @@ public:
     bool setHtmlChunk(const uint8_t* data, size_t len, bool isLast = false,
                       size_t offset = 0, bool hasOffset = false);
     bool isRunning() const { return _running; }
+    bool isCaptureActive() const { return _snifferStarted; }
+    bool hasCaptureTarget() const { return _hasTarget; }
+    bool isDnsActive() { return _dnsServer != nullptr && _dnsServer->isUp(); }
+    uint8_t stationCount() const { return _lastStationCount; }
     void update();   // call in loop()
 
     bool isComplete() const { return _htmlComplete; }
@@ -45,6 +49,8 @@ private:
     size_t   _htmlLen    = 0;
     size_t   _htmlExpected = 0;
     int      _loginAttempts = 0;
+    uint8_t  _lastStationCount = 0;
+    uint32_t _lastStationCountPollMs = 0;
     TaskHandle_t _deauthTaskHandle = nullptr;
     static String _servedSnapshot;
     static void deauthTaskFn(void* pvParameters);
