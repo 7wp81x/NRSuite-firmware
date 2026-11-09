@@ -25,7 +25,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0-rc.1"
+#define FW_VERSION "1.0.0-rc.2"
 
 #ifndef NRSUITE_ENABLE_NRUGOCHI
 #define NRSUITE_ENABLE_NRUGOCHI 1

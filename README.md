@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Beta](https://img.shields.io/badge/status-1.0.0--beta.3.2.0-yellow.svg)](../../releases)
+[![Status: Release candidate](https://img.shields.io/badge/status-1.0.0--rc.2-yellow.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current release line:** `1.0.0-beta.3.2.0`. Mesh support from merged mesh branches is present but experimental.
+**Candidate release line:** `1.0.0-rc.2`. The latest published firmware release remains `1.0.0-rc.1` until this candidate is approved and tagged. Mesh support from merged mesh branches is present but experimental.
 
 ---
 
@@ -66,10 +66,22 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 | Board | MCU | Native USB | BLE | BadUSB / MSC | Environment |
 |---|---|---|---|---|---|
 | ESP32-C3 DevKitM-1 | ESP32-C3 | Yes (CDC) | Yes | No | `esp32-c3` |
-| ESP32-C5 DevKitC-1 | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5` |
-| ESP32-S3 DevKitC-1 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3` |
+| ESP32-C5 DevKitC-1 (4 MB) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5` |
+| ESP32-C5 N8R4 (experimental) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5-n8r4` |
+| ESP32-C5 N16R4 (experimental) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5-n16r4` |
+| ESP32-S3 universal safe fallback | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3` |
+| ESP32-S3 N4R2 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n4r2` |
+| ESP32-S3 N4R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n4r8` |
+| ESP32-S3 N8R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n8r8` |
+| ESP32-S3 N16 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n16` |
+| ESP32-S3 N16R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n16r8` |
 | ESP32-S2 Saola-1 | ESP32-S2 | Yes (TinyUSB) | No | Yes | `esp32-s2` |
 | ESP32 DevKit | ESP32 | No (needs CP2102/CH340) | Yes | No | `esp32-devkit` |
+
+The `esp32-s3` image is the universal safe fallback for an S3 board whose exact
+flash/PSRAM variant is unknown. Select the matching N4R2/N4R8/N8R8/N16/N16R8
+environment when the board variant is known. ESP32-C5 N8R4/N16R4 are
+experimental profiles and require hardware validation before promotion.
 
 **Recommended board for getting started:** ESP32-C3 DevKitM-1. It has native USB CDC (no external USB-UART chip), BLE, and is the default build target.
 
@@ -197,7 +209,7 @@ distributed.
 | Wi-Fi Scan | All (C5: 2.4/5 GHz) | AP scan with SSID, BSSID, channel, RSSI, and security type; C5 scans use dual-band AUTO mode plus explicit 2.4/5 GHz channel bitmaps, with passive timing for 5 GHz scans. |
 | Packet Sniffer | All | Monitor-mode pcap capture, fixed channel or AUTO 2.4/5 GHz channel hopping, optional EAPOL-only filter |
 | Nrugochi capture support | C3, C5, S3, classic ESP32 | Advertises `nrugochi`; `DEAUTH_CHANNEL_CAPTURE` deauths multiple APs on a channel then captures all EAPOL + beacons for Android per-BSSID splitting, with requested/sent/failed TX telemetry. Disabled on ESP32-S2 for release memory/profile reasons. |
-| Firmware Release Assets | All | Merged release images named `esp32c3`, `esp32c5`, `esp32s3`, `esp32s3-psram`, `esp32s2`, and `esp32classic`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
+| Firmware Release Assets | All | Merged release images for ESP32 classic, C3, C5 universal/experimental N8R4/N16R4, S2, and S3 universal/N4R2/N4R8/N8R8/N16/N16R8; asset names come from `boards/targets.json`; C5 includes its `0x2000` bootloader in the normal `0x0` merged image |
 | Deauthentication | All | Raw 802.11 deauth frame injection; finite burst or unlimited duration-0 loop, elapsed/frames-per-second telemetry, capture-preserving `DEAUTH_BURST` retries, and firmware-native `DEAUTH_MULTI` with per-target channel scheduling and aggregate/per-target counters. Advertises `deauth_multi`. |
 | Deauth + Capture | All | Deauth followed by immediate EAPOL capture for WPA handshake collection |
 | WPS Pixie Dust | All | Raw WPS registrar M1-M8 flow, AP-lock preflight, hidden randomized WPA2 helper SoftAP, M3-only Pixie capture, same-session recovered-PIN continuation, and WSC completion. Advertises `wps_pixie` on all ESP32 targets. |
@@ -360,28 +372,41 @@ Build a specific board:
 
 ```bash
 pio run -e esp32-c3
-pio run -e esp32-s3             # S3 without PSRAM
-pio run -e esp32-s3-psram       # S3 with 2 MB QSPI PSRAM
+pio run -e esp32-s3             # universal S3 safe fallback
+pio run -e esp32-s3-n4r2        # 4 MB flash + 2 MB PSRAM
+pio run -e esp32-s3-n4r8        # 4 MB flash + 8 MB PSRAM
+pio run -e esp32-s3-n8r8        # 8 MB flash + 8 MB PSRAM
+pio run -e esp32-s3-n16         # 16 MB flash, no PSRAM
+pio run -e esp32-s3-n16r8       # 16 MB flash + 8 MB PSRAM
+pio run -e esp32-c5
+pio run -e esp32-c5-n8r4        # experimental
+pio run -e esp32-c5-n16r4       # experimental
 pio run -e esp32-s2
 pio run -e esp32-devkit
 ```
 
-Build all targets:
+The old `esp32-s3-psram` name remains available as a compatibility alias for
+`esp32-s3-n4r2`. Build all release targets with:
 
 ```bash
-pio run -e esp32-c5 -e esp32-c3 -e esp32-s3 -e esp32-s3-psram \
-  -e esp32-s2 -e esp32-devkit
+pio run -e esp32-c5 -e esp32-c5-n8r4 -e esp32-c5-n16r4 -e esp32-c3 \
+  -e esp32-s3 -e esp32-s3-n4r2 -e esp32-s3-n4r8 -e esp32-s3-n8r8 \
+  -e esp32-s3-n16 -e esp32-s3-n16r8 -e esp32-s2 -e esp32-devkit
 ```
 
 Firmware library dependencies are pinned to exact tested versions in
-`platformio.ini` for reproducible release builds.
+`platformio.ini` for reproducible release builds. Per-board environments,
+partition tables, and release asset names are defined in `boards/`; see
+[`boards/README.md`](boards/README.md).
 
 ### PSRAM use
 
-The `esp32-s3-psram` profile targets boards such as the ESP32-S3 DevKitC-1
-N4R2: 4 MB flash plus 2 MB QSPI PSRAM. PSRAM is detected at runtime and reported
-through `STATUS.psram_total` / `STATUS.psram_free`; `STATUS.features` includes
-`psram` when present. The no-PSRAM `esp32-s3` profile remains separate.
+The S3 PSRAM profiles cover N4R2, N4R8, N8R8, and N16R8 boards. PSRAM is
+detected at runtime and reported through `STATUS.psram_total` /
+`STATUS.psram_free`; `STATUS.features` includes `psram` when present. The
+no-PSRAM `esp32-s3` and `esp32-s3-n16` profiles remain separate. Boards with the
+same flash/PSRAM class share an image; do not infer a variant from flash size
+alone in the app unless the image name identifies it.
 
 PSRAM is currently used opportunistically for large non-DMA buffers. The
 packet-sniffer frame and client-event queues are allocated with
@@ -528,12 +553,18 @@ lib/
 test/
   test_protocol_spec/  # Native unit tests for the bridge protocol
 
-default_4MB.csv          # Default 4MB partition table
-esp32c3_partitions.csv   # C3-specific partition layout (LittleFS)
-esp32s2_msc_partitions.csv  # S2 partition layout with FAT for MSC
-esp32s3_msc_partitions.csv  # S3 partition layout with FAT for MSC
-merge_script.py          # Post-build script that merges bootloader + partitions + app into one flashable binary
-platformio.ini           # PlatformIO build configuration
+boards/
+  targets.json           # Target registry: env, flash/PSRAM, offsets, asset names
+  *.ini                  # Per-board PlatformIO environments
+  common/                # Shared per-family configuration
+partitions/
+  *.csv                  # NVS/app/FAT or LittleFS partition layouts
+scripts/
+  target_registry.py     # Registry + partition-table resolution helpers
+  validate_targets.py    # CI/local registry and layout validation
+  verify_merged_images.py # CI/local merged-image offset validation
+merge_script.py          # Post-build merge using registry-resolved app offsets
+platformio.ini           # Shared PlatformIO config and extra_configs only
 ```
 
 ---
@@ -589,6 +620,8 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
+| v1.0.0-rc.2 (candidate) | v1.0.0-rc.3 (candidate) | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0-rc.1 | v1.0.0-rc.2 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-beta.3.2.0 | v1.0.0-beta.3.2.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 
 ---
