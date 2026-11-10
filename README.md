@@ -500,7 +500,7 @@ Replace `esp32-c3` with your target environment.
 Download the merged binary from [Releases](../../releases) and flash it:
 
 ```bash
-esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 beta-nrsuite-esp32c3.bin
+esptool.py --port /dev/ttyUSB0 --baud 921600 write_flash 0x0 nrsuite-esp32c3.bin
 ```
 
 > The release binary is a merged flash image (bootloader + partition table + app) produced by `merge_script.py` at build time. Use offset `0x0` when flashing the merged binary.

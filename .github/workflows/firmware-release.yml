@@ -98,13 +98,11 @@ jobs:
       - name: Verify merged image offsets
         run: python3 scripts/verify_merged_images.py --environment ${{ matrix.environment }} --version ${{ steps.release_channel.outputs.version }}
 
-      - name: Rename binaries with version tag
+      - name: Collect release binaries
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_CHANNEL: ${{ steps.release_channel.outputs.channel }}
         run: |
           set -e
-          TAG="$RELEASE_TAG"
           case "$RELEASE_CHANNEL" in
             alpha|beta) SRC_DIR=beta-release ;;
             rc)         SRC_DIR=rc-release ;;
@@ -118,7 +116,7 @@ jobs:
           for f in "$SRC_DIR"/*.bin; do
             [ -f "$f" ] || continue
             found=1
-            cp "$f" "dist/$(basename "$f" .bin)-${TAG}.bin"
+            cp "$f" "dist/$(basename "$f")"
           done
           [ "$found" -eq 1 ] || { echo "No .bin files found in $SRC_DIR"; exit 1; }
 
@@ -190,21 +188,21 @@ jobs:
 
             | Board | Environment | Binary pattern |
             |---|---|---|
-            | ESP32-C5 DevKitC-1 (4 MB) | `esp32-c5` | `nrsuite-esp32c5-*.bin` |
-            | ESP32-C5 N8R4 (experimental) | `esp32-c5-n8r4` | `nrsuite-esp32c5-n8r4-*.bin` |
-            | ESP32-C5 N16R4 (experimental) | `esp32-c5-n16r4` | `nrsuite-esp32c5-n16r4-*.bin` |
-            | ESP32-C3 DevKitM-1 | `esp32-c3` | `nrsuite-esp32c3-*.bin` |
-            | ESP32-S3 universal safe fallback | `esp32-s3` | `nrsuite-esp32s3-*.bin` |
-            | ESP32-S3 N4R2 | `esp32-s3-n4r2` | `nrsuite-esp32s3-n4r2-*.bin` |
-            | ESP32-S3 N4R8 | `esp32-s3-n4r8` | `nrsuite-esp32s3-n4r8-*.bin` |
-            | ESP32-S3 N8R8 | `esp32-s3-n8r8` | `nrsuite-esp32s3-n8r8-*.bin` |
-            | ESP32-S3 N16 | `esp32-s3-n16` | `nrsuite-esp32s3-n16-*.bin` |
-            | ESP32-S3 N16R8 | `esp32-s3-n16r8` | `nrsuite-esp32s3-n16r8-*.bin` |
-            | ESP32-S2 Saola-1 | `esp32-s2` | `nrsuite-esp32s2-*.bin` |
-            | ESP32 DevKit | `esp32-devkit` | `nrsuite-esp32classic-*.bin` |
+            | ESP32-C5 DevKitC-1 (4 MB) | `esp32-c5` | `nrsuite-esp32c5.bin` |
+            | ESP32-C5 N8R4 (experimental) | `esp32-c5-n8r4` | `nrsuite-esp32c5-n8r4.bin` |
+            | ESP32-C5 N16R4 (experimental) | `esp32-c5-n16r4` | `nrsuite-esp32c5-n16r4.bin` |
+            | ESP32-C3 DevKitM-1 | `esp32-c3` | `nrsuite-esp32c3.bin` |
+            | ESP32-S3 universal safe fallback | `esp32-s3` | `nrsuite-esp32s3.bin` |
+            | ESP32-S3 universal PSRAM (N4R2) | `esp32-s3-n4r2` | `nrsuite-esp32s3-psram.bin` |
+            | ESP32-S3 N4R8 | `esp32-s3-n4r8` | `nrsuite-esp32s3-n4r8.bin` |
+            | ESP32-S3 N8R8 | `esp32-s3-n8r8` | `nrsuite-esp32s3-n8r8.bin` |
+            | ESP32-S3 N16 | `esp32-s3-n16` | `nrsuite-esp32s3-n16.bin` |
+            | ESP32-S3 N16R8 | `esp32-s3-n16r8` | `nrsuite-esp32s3-n16r8.bin` |
+            | ESP32-S2 Saola-1 | `esp32-s2` | `nrsuite-esp32s2.bin` |
+            | ESP32 DevKit | `esp32-devkit` | `nrsuite-esp32classic.bin` |
 
-            > Alpha/beta tags use a `beta-` asset prefix and RC tags use an
-            > `rc-` asset prefix. Stable tags use the unprefixed `nrsuite-` name.
+            > Asset names are channel-independent; the GitHub release tag carries
+            > the version. The same canonical binary name is used for every channel.
             > C5 merged images start at flash offset `0x0` and contain the
             > bootloader at `0x2000`. S3 release images keep app0 at `0x10000`.
             > C5 N8R4/N16R4 are experimental target profiles and require

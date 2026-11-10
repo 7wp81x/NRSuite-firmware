@@ -110,9 +110,8 @@ def validate(project_dir: Path) -> list[str]:
 
         for channel in ("stable", "beta", "rc"):
             prefix = registry["release_asset_prefixes"][channel]
-            expected_prefix = "" if channel == "stable" else f"{channel}-"
-            if prefix != expected_prefix:
-                fail(f"unexpected {channel} asset prefix {prefix!r}")
+            if prefix != "":
+                fail(f"{channel} asset prefix must be empty, got {prefix!r}")
 
         lines.append(
             f"{environment:28s} {target['flash_size']:>4s} "
