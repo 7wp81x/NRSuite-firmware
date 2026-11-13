@@ -20,7 +20,7 @@ constexpr uint32_t WPS_M3_TIMEOUT_MS = 10000;
 constexpr uint32_t WPS_M3_RETRY_AFTER_MS = 3000;
 constexpr uint8_t WPS_M3_MAX_RETRIES = 1;
 constexpr uint32_t WPS_M1_TIMEOUT_MS = 10000;
-constexpr UBaseType_t WPS_RX_QUEUE_DEPTH = 32;
+constexpr UBaseType_t WPS_RX_QUEUE_DEPTH = 12;
 constexpr uint32_t WPS_RECOVERED_PIN_TIMEOUT_MS = 30000;
 constexpr uint32_t WPS_WSC_DONE_TIMEOUT_MS = 5000;
 constexpr uint32_t WPS_RADIO_SETTLE_MS = 150;
@@ -231,6 +231,13 @@ bool WpsPixieManager::startAttempt(
     lastRxEapId_ = 0;
     lastRxWpsMessage_ = 0;
     lastRxFlags_ = 0;
+    rxEapolUnparsed_ = 0;
+    lastUnparsedEapCode_ = 0;
+    lastUnparsedEapId_ = 0;
+    lastUnparsedEapType_ = 0;
+    m2TxCount_ = 0;
+    lastM2EapId_ = 0;
+    lastM2TxMs_ = 0;
     state_ = State::StartPending;
     emitProgress("prepare", "WPS attempt accepted; preparing radio");
     return true;
@@ -453,7 +460,13 @@ void WpsPixieManager::update() {
             ++m3RetryCount_;
             emitProgress(
                 "m3-retry",
-                "M3 not observed; restarting WPS association once");
+                "M3 not observed; rotating station MAC and restarting association once");
+            // Clear the AP's state for the old randomized MAC before changing
+            // the station address. startRawAssociation() repeats cleanup for
+            // the new MAC after rotation.
+            sendDeauthFrame();
+            delay(20);
+            rotateStationMacForRetry();
             fragmentActive_ = false;
             lastFragmentLength_ = 0;
             haveLastWscRequest_ = false;
@@ -476,6 +489,20 @@ void WpsPixieManager::update() {
 
     if (millis() - startedMs_ > WPS_PIXIE_TIMEOUT_MS) {
         fail("timeout", "WPS Pixie attempt timed out");
+    }
+}
+
+void WpsPixieManager::rotateStationMacForRetry() {
+    uint8_t selectedMac[6]{};
+    esp_fill_random(selectedMac, sizeof(selectedMac));
+    selectedMac[0] = static_cast<uint8_t>((selectedMac[0] & 0xfc) | 0x02);
+    if (esp_wifi_set_mac(WIFI_IF_STA, selectedMac) == ESP_OK) {
+        delay(30);
+        esp_wifi_get_mac(WIFI_IF_STA, stationMac_);
+        std::memcpy(reusableMac_, stationMac_, sizeof(reusableMac_));
+        std::memcpy(reusableMacBssid_, targetBssid_, sizeof(reusableMacBssid_));
+        reusableMacValid_ = true;
+        macChanged_ = true;
     }
 }
 
@@ -534,6 +561,14 @@ void WpsPixieManager::appendRxDiagnostics(JsonDocument& doc) const {
     doc["last_rx_eap_id"] = lastRxEapId_;
     doc["last_rx_wps_message"] = lastRxWpsMessage_;
     doc["last_rx_flags"] = lastRxFlags_;
+    doc["rx_eapol_unparsed"] = rxEapolUnparsed_;
+    doc["last_unparsed_eap_code"] = lastUnparsedEapCode_;
+    doc["last_unparsed_eap_id"] = lastUnparsedEapId_;
+    doc["last_unparsed_eap_type"] = lastUnparsedEapType_;
+    doc["m2_tx_count"] = m2TxCount_;
+    doc["last_m2_len"] = lastM2Length_;
+    doc["last_m2_eap_id"] = lastM2EapId_;
+    doc["last_m2_tx_ms"] = lastM2TxMs_;
 }
 
 void WpsPixieManager::emitWrongPin(bool firstHalfValid, bool firstHalfKnown, bool m3Only) {
@@ -617,6 +652,9 @@ void WpsPixieManager::cleanupRadioState() {
 
 void WpsPixieManager::finish() {
     cleanupRadioState();
+    // Keep the small fixed RX queue allocated across attempts. Deleting it
+    // here can race an in-flight promiscuous callback; the queue is bounded and
+    // intentionally released only at reboot.
     fragmentActive_ = false;
     lastFragmentLength_ = 0;
     haveLastWscRequest_ = false;
@@ -1165,9 +1203,13 @@ void WpsPixieManager::processEapol(const uint8_t* data, size_t length) {
         return;
     }
 
+    ++rxEapolUnparsed_;
     const uint8_t* eap = data + 4;
     const size_t eapolLength = readBe16(data + 2);
     if (eapolLength < 5) return;
+    lastUnparsedEapCode_ = eap[0];
+    lastUnparsedEapId_ = eap[1];
+    lastUnparsedEapType_ = eapolLength >= 5 ? eap[4] : 0;
     if (eap[0] == 0x01 && eap[4] == 0x01) {
         emitProgress("identity", "EAP Identity Request received");
         if (state_ == State::WaitM3 || state_ == State::WaitM5 ||
@@ -1238,6 +1280,9 @@ void WpsPixieManager::handleM1(const EapWscFrame& frame) {
         fail("m2_tx_failed", "M2 TX failed");
         return;
     }
+    ++m2TxCount_;
+    lastM2EapId_ = frame.eap_id;
+    lastM2TxMs_ = millis();
     rememberWscReply(lastM2_, lastM2Length_);
     state_ = State::WaitM3;
     m3WaitStartedMs_ = millis();

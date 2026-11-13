@@ -1399,6 +1399,8 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
             JsonDocument resp;
             resp["ok"] = false;
             resp["error"] = error;
+            resp["free_heap"] = ESP.getFreeHeap();
+            resp["largest_block"] = ESP.getMaxAllocHeap();
             String json;
             serializeJson(resp, json);
             proto.sendRaw(TYPE_RESP, id, (const uint8_t*)json.c_str(), json.length());

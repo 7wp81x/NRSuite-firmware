@@ -92,6 +92,7 @@ private:
     void handleM3(const wps::EapWscFrame& frame);
     void handleM5(const wps::EapWscFrame& frame);
     void handleM7(const wps::EapWscFrame& frame);
+    void rotateStationMacForRetry();
     void handleWscDone(const wps::EapWscFrame& frame);
     void handleWscNack(const wps::EapWscFrame& frame);
 
@@ -162,6 +163,13 @@ private:
     uint8_t lastRxEapId_ = 0;
     uint8_t lastRxWpsMessage_ = 0;
     uint8_t lastRxFlags_ = 0;
+    uint32_t rxEapolUnparsed_ = 0;
+    uint8_t lastUnparsedEapCode_ = 0;
+    uint8_t lastUnparsedEapId_ = 0;
+    uint8_t lastUnparsedEapType_ = 0;
+    uint32_t m2TxCount_ = 0;
+    uint8_t lastM2EapId_ = 0;
+    uint32_t lastM2TxMs_ = 0;
 
     uint8_t enrolleeNonce_[16]{};
     uint8_t registrarNonce_[16]{};
