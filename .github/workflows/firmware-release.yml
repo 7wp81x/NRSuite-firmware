@@ -222,7 +222,8 @@ jobs:
 
             ### Compatibility
 
-            Requires NRSuite Android app `${{ github.ref_name }}`. See the
+            Use a compatible NRSuite Android app release. Firmware and Android
+            candidate versions are tracked independently; see the
             [firmware README](https://github.com/7wp81x/NRSuite-firmware#versioning-and-compatibility)
             for the current compatibility table.
 
