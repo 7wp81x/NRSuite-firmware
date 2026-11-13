@@ -564,11 +564,12 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     if (dnsHijackEnabled) {
         Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
     }
+    const bool include5ghz = channel > 14;
     if (targetBssid) {
         memcpy(_targetBssid, targetBssid, 6);
         _hasTarget = true;
         Sniffer::instance()->setEapolFilter(true, targetBssid);
-        _snifferStarted = Sniffer::instance()->startFixed(channel);
+        _snifferStarted = Sniffer::instance()->startFixed(channel, include5ghz);
         if (!_snifferStarted) {
             if (error) *error = "capture start failed";
             NRSUITE_DEBUG_PRINTLN("PORTAL: EAPOL capture start failed");
@@ -583,7 +584,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             return false;
         }
     } else if (dnsHijackEnabled) {
-        _snifferStarted = Sniffer::instance()->startDnsHijack(channel);
+        _snifferStarted = Sniffer::instance()->startDnsHijack(channel, include5ghz);
     }
     if (dnsHijackEnabled && !_snifferStarted) {
         // lwIP's wildcard DNS server still works for DHCP-configured clients;

