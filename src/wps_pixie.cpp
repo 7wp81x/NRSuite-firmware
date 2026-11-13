@@ -928,6 +928,10 @@ void WpsPixieManager::promiscuousCallback(void* buffer, wifi_promiscuous_pkt_typ
     const uint8_t* addr1 = frame + 4;
     const uint8_t* addr2 = frame + 10;
     const uint8_t* addr3 = frame + 16;
+    // Only AP-to-station EAPOL frames belong in this state machine. Keep the
+    // FromDS check while accepting either address ordering: without it, the
+    // promiscuous path can queue our own transmitted EAPOL-Start/M2 frames.
+    if ((frame[1] & 0x02) == 0) return;
     const bool stationMatch =
         std::memcmp(addr1, stationMac_, 6) == 0 ||
         std::memcmp(addr2, stationMac_, 6) == 0 ||
