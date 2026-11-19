@@ -73,6 +73,14 @@ python3 scripts/verify_merged_images.py --version 1.0.0-rc.2
 - C5 N8R4/N16R4 are experimental. C5 has no MSC support, so their additional
   flash is assigned to the LittleFS data partition.
 
+## Hardware validation
+
+- `esp32-s3-n16r8` was validated on an ESP32-S3 DevKitC-1 N16R8
+  (rev v0.2, CH9102 USB bridge): the merged image flashed at `0x0`, the
+  protocol answered, the Android app completed a Wi-Fi scan, `esptool`
+  reported a 16 MB flash size, and the embedded partition table ended at
+  `0x1000000`.
+
 ## Adding a target
 
 1. Add a `boards/<target>.ini` environment that extends the appropriate shared

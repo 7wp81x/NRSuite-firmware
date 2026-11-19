@@ -14,6 +14,9 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 **Candidate release line:** `1.0.0-rc.2.1`. The latest published firmware release remains `1.0.0-rc.2` until this candidate is approved and tagged. Mesh support from merged mesh branches is present but experimental.
 
+Full user documentation, supported-board details, and flashing instructions:
+[NRSuite Documentation](https://7wp81x.github.io/NRSuite-Docs/)
+
 ---
 
 ## Quick Start
@@ -62,6 +65,9 @@ Use `#support` for help, `#showcase` for builds, and `#github` for repo/code dis
 ---
 
 ## Supported Boards
+
+Full board compatibility details:
+[Supported Boards](https://7wp81x.github.io/NRSuite-Docs/firmware/supported-boards/)
 
 | Board | MCU | Native USB | BLE | BadUSB / MSC | Environment |
 |---|---|---|---|---|---|
@@ -460,6 +466,9 @@ That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
 ---
 
 ## Flashing
+
+See the central [Firmware Flashing guide](https://7wp81x.github.io/NRSuite-Docs/firmware/flashing/)
+for additional target-selection and USB-UART bridge notes.
 
 ### Flash all connected boards through a hub
 
