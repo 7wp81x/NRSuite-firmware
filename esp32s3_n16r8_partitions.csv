@@ -1,7 +1,0 @@
-# Partition table: ESP32-S3 with 16 MB flash (e.g. DevKitC-1 N16R8).
-# Same app slot as the 4 MB layout; the extra 12 MB goes to msc_ffat so
-# USB MSC has room for DuckyScript, portal bundles and IR files.
-# Name,     Type, SubType,  Offset,   Size,     Flags
-nvs,        data, nvs,      0x9000,   0x5000,
-app0,       app,  factory,  0x10000,  0x300000,
-msc_ffat,   data, fat,      0x310000, 0xCF0000,

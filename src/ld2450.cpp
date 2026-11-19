@@ -1,3 +1,4 @@
+#include "NrDebugLog.h"
 #include "ld2450.h"
 
 bool Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t txPin,
@@ -21,7 +22,7 @@ bool Ld2450::begin(HardwareSerial& serial, uint32_t baud, int8_t rxPin, int8_t t
     _rawPrintCounter = 0;
 
     if (_debugPrint) {
-        Serial.printf("[LD2450] UART started: baud=%lu rx=%d tx=%d\n",
+        NRSUITE_DEBUG_PRINTF("[LD2450] UART started: baud=%lu rx=%d tx=%d\n",
                       (unsigned long)baud, rxPin, txPin);
     }
     return true;
@@ -47,7 +48,7 @@ void Ld2450::stop() {
         _serial = nullptr;
     }
     if (_debugPrint) {
-        Serial.println("[LD2450] stopped");
+        NRSUITE_DEBUG_PRINTLN("[LD2450] stopped");
     }
 }
 
@@ -129,22 +130,22 @@ void Ld2450::handleFrame() {
 }
 
 void Ld2450::printRawFrame() {
-    Serial.print("[LD2450] raw: AA FF 03 00");
+    NRSUITE_DEBUG_PRINT("[LD2450] raw: AA FF 03 00");
     for (size_t i = 0; i < sizeof(_payload); i++) {
-        Serial.printf(" %02X", _payload[i]);
+        NRSUITE_DEBUG_PRINTF(" %02X", _payload[i]);
     }
-    Serial.println(" 55 CC");
+    NRSUITE_DEBUG_PRINTLN(" 55 CC");
 }
 
 void Ld2450::printFrame(uint8_t validCount) {
     const uint32_t now = millis();
 
     if (validCount > 0) {
-        Serial.printf("[LD2450] %lu ms targets=%u\n", (unsigned long)now, validCount);
+        NRSUITE_DEBUG_PRINTF("[LD2450] %lu ms targets=%u\n", (unsigned long)now, validCount);
         for (uint8_t i = 0; i < 3; i++) {
             const Target& target = _targets[i];
             if (!target.valid) continue;
-            Serial.printf(
+            NRSUITE_DEBUG_PRINTF(
                 "  T%u x=%d mm (%d cm) y=%d mm (%d cm) speed=%+d cm/s (%s) res=%u mm\n",
                 i + 1,
                 target.xMm, target.xMm / 10,
@@ -154,12 +155,12 @@ void Ld2450::printFrame(uint8_t validCount) {
         }
         _lastNoTargetPrintMs = now;
     } else if (now - _lastNoTargetPrintMs >= 1000) {
-        Serial.printf("[LD2450] %lu ms targets=0\n", (unsigned long)now);
+        NRSUITE_DEBUG_PRINTF("[LD2450] %lu ms targets=0\n", (unsigned long)now);
         _lastNoTargetPrintMs = now;
     }
 
     if (now - _lastStatsPrintMs >= 5000) {
-        Serial.printf("[LD2450] stats valid=%lu invalid=%lu dropped=%lu heap=%u\n",
+        NRSUITE_DEBUG_PRINTF("[LD2450] stats valid=%lu invalid=%lu dropped=%lu heap=%u\n",
                       (unsigned long)_validFrames,
                       (unsigned long)_invalidFrames,
                       (unsigned long)_droppedBytes,

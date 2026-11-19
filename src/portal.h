@@ -7,15 +7,24 @@
 #include "BridgeProtocol.h"
 #include "sniffer.h"
 
+#ifndef NRSUITE_ENABLE_PORTAL
+#define NRSUITE_ENABLE_PORTAL 1
+#endif
+
 class PortalManager {
 public:
     void begin(BridgeProtocol& proto);
     bool start(const char* ssid, uint8_t channel, const uint8_t* targetBssid = nullptr,
-               bool showNotice = true, String* error = nullptr);
+               bool showNotice = true, String* error = nullptr,
+               bool dnsHijackEnabled = true);
     void stop();
     bool setHtmlChunk(const uint8_t* data, size_t len, bool isLast = false,
                       size_t offset = 0, bool hasOffset = false);
     bool isRunning() const { return _running; }
+    bool isCaptureActive() const { return _snifferStarted; }
+    bool hasCaptureTarget() const { return _hasTarget; }
+    bool isDnsActive() { return _dnsServer != nullptr && _dnsServer->isUp(); }
+    uint8_t stationCount() const { return _lastStationCount; }
     void update();   // call in loop()
 
     bool isComplete() const { return _htmlComplete; }
@@ -32,6 +41,7 @@ private:
     bool _showNotice = true;
     bool _storageMounted = false;
     bool _apStarted = false;
+    bool _snifferStarted = false;
     File _htmlFile;
     uint8_t _targetBssid[6] = {0};
     bool _hasTarget = false;
@@ -39,6 +49,8 @@ private:
     size_t   _htmlLen    = 0;
     size_t   _htmlExpected = 0;
     int      _loginAttempts = 0;
+    uint8_t  _lastStationCount = 0;
+    uint32_t _lastStationCountPollMs = 0;
     TaskHandle_t _deauthTaskHandle = nullptr;
     static String _servedSnapshot;
     static void deauthTaskFn(void* pvParameters);
@@ -54,6 +66,7 @@ private:
                          bool ignoreAttemptArg = false);
     String loadingPlaceholder() const;
     String noticePage() const;
+    void sendLandingResponse(AsyncWebServerRequest* request);
     void sendPortalContent(AsyncWebServerRequest* request);
     bool mountPortalStorage();
     void unmountPortalStorage();

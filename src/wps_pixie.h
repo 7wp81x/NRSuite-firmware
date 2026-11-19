@@ -92,10 +92,12 @@ private:
     void handleM3(const wps::EapWscFrame& frame);
     void handleM5(const wps::EapWscFrame& frame);
     void handleM7(const wps::EapWscFrame& frame);
+    void rotateStationMacForRetry();
     void handleWscDone(const wps::EapWscFrame& frame);
     void handleWscNack(const wps::EapWscFrame& frame);
 
     void emitProgress(const char* stage, const String& message);
+    void appendRxDiagnostics(JsonDocument& doc) const;
     void emitWrongPin(bool firstHalfValid, bool firstHalfKnown, bool m3Only);
     void emitPsk(const uint8_t* key, size_t keyLength);
     void emitError(const char* code, const String& message);
@@ -140,6 +142,34 @@ private:
     uint32_t wscDoneWaitStartedMs_ = 0;
     uint32_t lockCheckStartedMs_ = 0;
     uint32_t lockSeenMs_ = 0;
+    uint8_t m3RetryCount_ = 0;
+
+    // Bounded receive diagnostics. These are included in WPS error events so a
+    // timeout can be distinguished from a filter/queue/parser failure.
+    uint32_t rxEapolSeen_ = 0;
+    uint32_t rxEapolQueued_ = 0;
+    uint32_t rxEapolDropped_ = 0;
+    uint32_t rxEapolParsed_ = 0;
+    uint32_t rxM1Count_ = 0;
+    uint32_t rxM2DCount_ = 0;
+    uint32_t rxM3Count_ = 0;
+    uint32_t rxM5Count_ = 0;
+    uint32_t rxM7Count_ = 0;
+    uint32_t rxAckCount_ = 0;
+    uint32_t rxNackCount_ = 0;
+    uint32_t lastRxMs_ = 0;
+    uint16_t lastRxEapolLength_ = 0;
+    uint8_t lastRxEapCode_ = 0;
+    uint8_t lastRxEapId_ = 0;
+    uint8_t lastRxWpsMessage_ = 0;
+    uint8_t lastRxFlags_ = 0;
+    uint32_t rxEapolUnparsed_ = 0;
+    uint8_t lastUnparsedEapCode_ = 0;
+    uint8_t lastUnparsedEapId_ = 0;
+    uint8_t lastUnparsedEapType_ = 0;
+    uint32_t m2TxCount_ = 0;
+    uint8_t lastM2EapId_ = 0;
+    uint32_t lastM2TxMs_ = 0;
 
     uint8_t enrolleeNonce_[16]{};
     uint8_t registrarNonce_[16]{};
