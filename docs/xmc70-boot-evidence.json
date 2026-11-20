@@ -1,0 +1,51 @@
+{
+  "observed_on": "2026-11-02",
+  "release": "v1.0.0-beta.3.1.2",
+  "source_url": "https://github.com/7wp81x/NRSuite-firmware/releases/download/v1.0.0-beta.3.1.2/beta-nrsuite-esp32s3-v1.0.0-beta.3.1.2.bin",
+  "board": {
+    "chip": "ESP32-S3",
+    "revision": "v0.2",
+    "flash_manufacturer": "0x20",
+    "flash_device": "0x7018",
+    "flash_size_bytes": 16777216,
+    "embedded_psram_bytes": 8388608
+  },
+  "image_bytes": 1676048,
+  "bootloader_bytes": 18976,
+  "hashes": {
+    "original_sha256": "b8447c5ca535ee2f288097ccb52de548beb8d8f2412b35024a85913844a60b8e",
+    "original_bootloader_sha256": "f65462cc7cfbe2382ccd4827a612a0081b03e4f6107aa7ea49e903df298558b8",
+    "corrected_sha256": "e76ca44658249e45568c6546533199f05ad2221b12d48a588b839bfe46d0f528",
+    "corrected_bootloader_sha256": "694ab548c7891f7aeaa16fa017b496159f6d33605f13981f471cf624f90bbb8a"
+  },
+  "patch": {
+    "offset": 9816,
+    "original_bytes": "4c1aa79907",
+    "corrected_bytes": "a2c990cc6a",
+    "application_and_partitions_unchanged": true,
+    "scope": "board-specific substitution of family 0x70 for 0x41; not a universal flash-family fix"
+  },
+  "flash_write_hash_verified": true,
+  "usb_status_samples": [
+    {
+      "fw": "v1.0.0-beta.3.1.2",
+      "chip": "ESP32-S3",
+      "uptime": 20842,
+      "heap": 147372
+    },
+    {
+      "fw": "v1.0.0-beta.3.1.2",
+      "chip": "ESP32-S3",
+      "uptime": 36052,
+      "heap": 147372
+    },
+    {
+      "fw": "v1.0.0-beta.3.1.2",
+      "chip": "ESP32-S3",
+      "uptime": 51268,
+      "heap": 147372
+    }
+  ],
+  "acceptance_scope": "USB STATUS only after physical reset out of ROM download mode; no cold power cycle or Android UI test",
+  "historical_observation": "Earlier beta.3 stock image failed with bootloader_flash: XMC flash startup fail; the same bootloader correction restored boot. The stock 3.1.2 application was not deliberately flashed again to recreate that failure."
+}
