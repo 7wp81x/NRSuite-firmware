@@ -59,7 +59,7 @@ After a build, verify that every merged image has the bootloader, partition
 table, and application at the expected offsets:
 
 ```bash
-python3 scripts/verify_merged_images.py --version 1.0.0-rc.2
+python3 scripts/verify_merged_images.py --version 1.0.0
 ```
 
 ## Partition rules

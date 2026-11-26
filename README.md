@@ -72,18 +72,18 @@ Full board compatibility details:
 
 | Board | MCU | Native USB | BLE | BadUSB / MSC | Environment |
 |---|---|---|---|---|---|
-| ESP32-C3 DevKitM-1 | ESP32-C3 | Yes (CDC) | Yes | No | `esp32-c3` |
-| ESP32-C5 DevKitC-1 (4 MB) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5` |
-| ESP32-C5 N8R4 (experimental) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5-n8r4` |
-| ESP32-C5 N16R4 (experimental) | ESP32-C5 | Yes (CDC) | Yes | No | `esp32-c5-n16r4` |
-| ESP32-S3 universal safe fallback | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3` |
-| ESP32-S3 N4R2 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n4r2` |
-| ESP32-S3 N4R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n4r8` |
-| ESP32-S3 N8R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n8r8` |
-| ESP32-S3 N16 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n16` |
-| ESP32-S3 N16R8 | ESP32-S3 | Yes (TinyUSB) | Yes | Yes | `esp32-s3-n16r8` |
-| ESP32-S2 Saola-1 | ESP32-S2 | Yes (TinyUSB) | No | Yes | `esp32-s2` |
-| ESP32 DevKit | ESP32 | No (needs CP2102/CH340) | Yes | No | `esp32-devkit` |
+| ESP32-C3 DevKitM-1 | ESP32-C3 | ✅ (CDC) | ✅ | ❌ | `esp32-c3` |
+| ESP32-C5 DevKitC-1 (4 MB) | ESP32-C5 | ✅ (CDC) | ✅ | ❌ | `esp32-c5` |
+| ESP32-C5 N8R4 (experimental) | ESP32-C5 | ✅ (CDC) | ✅ | ❌ | `esp32-c5-n8r4` |
+| ESP32-C5 N16R4 (experimental) | ESP32-C5 | ✅ (CDC) | ✅ | ❌ | `esp32-c5-n16r4` |
+| ESP32-S3 universal safe fallback | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3` |
+| ESP32-S3 N4R2 | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3-n4r2` |
+| ESP32-S3 N4R8 | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3-n4r8` |
+| ESP32-S3 N8R8 | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3-n8r8` |
+| ESP32-S3 N16 | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3-n16` |
+| ESP32-S3 N16R8 | ESP32-S3 | ✅ (TinyUSB) | ✅ | ✅ | `esp32-s3-n16r8` |
+| ESP32-S2 Saola-1 | ESP32-S2 | ✅ (TinyUSB) | ❌ | ✅ | `esp32-s2` |
+| ESP32 DevKit | ESP32 | ❌ (needs CP2102/CH340) | ✅ | ❌ | `esp32-devkit` |
 
 The `esp32-s3` image is the universal safe fallback for an S3 board whose exact
 flash/PSRAM variant is unknown. Select the matching N4R2/N4R8/N8R8/N16/N16R8
