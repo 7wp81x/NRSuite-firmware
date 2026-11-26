@@ -213,7 +213,7 @@
       "asset_name": "nrsuite-esp32s3-n16r8.bin",
       "release_status": "supported",
       "release_available": true,
-      "hardware_validated": false
+      "hardware_validated": true
     },
     {
       "environment": "esp32-devkit-ld2450-debug",
