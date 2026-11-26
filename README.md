@@ -3,7 +3,8 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
-[![Status: Release candidate](https://img.shields.io/badge/status-1.0.0--rc.2.1-yellow.svg)](../../releases)
+[![Documentation](https://img.shields.io/badge/docs-NRSuite--Docs-3DDC84?logo=readthedocs&logoColor=white)](https://7wp81x.github.io/NRSuite-Docs/)
+[![Status: Stable](https://img.shields.io/badge/status-1.0.0-brightgreen.svg)](../../releases)
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
@@ -12,7 +13,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Candidate release line:** `1.0.0-rc.2.1`. The latest published firmware release remains `1.0.0-rc.2` until this candidate is approved and tagged. Mesh support from merged mesh branches is present but experimental.
+**Current stable release line:** `1.0.0`. Mesh support remains experimental and is outside the v1 non-mesh release scope.
 
 Full user documentation, supported-board details, and flashing instructions:
 [NRSuite Documentation](https://7wp81x.github.io/NRSuite-Docs/)
@@ -231,7 +232,7 @@ distributed.
 | BLE GATT Profile | C3, C5, S3, DevKit | Read-only GATT service/characteristic enumeration after a BLE scan |
 | BadUSB | S2, S3 | USB HID keyboard injection via TinyUSB, Ducky Script from storage; NVS fallback when FAT is unavailable |
 | PIN Bruteforce | S2, S3 | Supervised native-HID range/wordlist tester; one-shot boot-arm like BadUSB; max-attempt safety cap, progress/ETA, configurable typing/start delays, session persistence; native HID only |
-| BLE HID PIN Bruteforce | C3, C5, S3, DevKit | Hidden/experimental: live CDC-controlled BLE HID PIN tester retained for future use; lock-screen use unsupported |
+| BLE HID PIN Bruteforce | C3, C5, S3, DevKit | Firmware-side legacy capability retained; the Android module card is removed from v1.0.0 and lock-screen use is unsupported |
 | IR TX/RX | All | RMT-based raw IR transmit/receive with dynamic GPIO configuration, NVS persistence, JSON timing transport, and IR RX events |
 | LD2450 mmWave Radar | All | UART 256000 target parser, sign-magnitude decode, dynamic RX/TX GPIO configuration, NVS persistence, `LD2450_START/STOP/STATUS/SET_CONFIG`, and target/presence/error events |
 | Mass Storage | S2, S3 | USB MSC mode, FAT filesystem, file read/write/delete over USB |
@@ -470,6 +471,7 @@ That profile enables `LD2450_BOOT_START=1` and `LD2450_BOOT_DEBUG=1`.
 See the central [Firmware Flashing guide](https://7wp81x.github.io/NRSuite-Docs/firmware/flashing/)
 for additional target-selection and USB-UART bridge notes.
 
+
 ### Flash all connected boards through a hub
 
 The helper script probes every detected serial port with `esptool chip-id`,
@@ -629,7 +631,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-rc.2.1 (candidate) | v1.0.0-rc.3.1 (candidate) | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0 | v1.0.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.2 | v1.0.0-rc.3 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.1 | v1.0.0-rc.2 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-beta.3.2.0 | v1.0.0-beta.3.2.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
