@@ -12,7 +12,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Candidate release line:** `1.0.0-rc.2.1`. The latest published firmware release remains `1.0.0-rc.2` until this candidate is approved and tagged. Mesh support from merged mesh branches is present but experimental.
+**Current stable release line:** `1.0.0`. Mesh support remains experimental and is outside the v1 non-mesh release scope.
 
 ---
 
@@ -620,7 +620,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
-| v1.0.0-rc.2.1 (candidate) | v1.0.0-rc.3.1 (candidate) | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
+| v1.0.0 | v1.0.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.2 | v1.0.0-rc.3 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.1 | v1.0.0-rc.2 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-beta.3.2.0 | v1.0.0-beta.3.2.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
