@@ -11,6 +11,7 @@
 #include "portal.h"
 #include "beacon.h"
 #include "deauth_detector.h"
+#include "DeauthRules.h"
 #include "DeauthMultiRules.h"
 #include "hidden_ap.h"
 #include "mesh.h"
@@ -25,7 +26,7 @@
 #include "mbedtls/base64.h"
 #include "Preferences.h"
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.0.1"
 
 #ifndef NRSUITE_ENABLE_NRUGOCHI
 #define NRSUITE_ENABLE_NRUGOCHI 1
@@ -1674,6 +1675,7 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         #if NRSUITE_ENABLE_PORTAL
         features.add("portal");
         features.add("portal_html_offset");
+        features.add("portal_html_prestart");
         features.add("html_diag");
         #endif
         features.add("reboot");
@@ -2601,8 +2603,11 @@ void handleCmdImpl(uint8_t id, JsonDocument& doc) {
         const bool loopMode = strcmp(mode, "loop") == 0 && strcmp(cmd, "DEAUTH") == 0;
         uint32_t count = args["count"].as<uint32_t>() ? args["count"].as<uint32_t>() : 150;
         count = constrain(count, 1U, 2000U);
-        uint32_t durationSec = args["duration"].as<uint32_t>() ? args["duration"].as<uint32_t>() : 30;
-        durationSec = constrain(durationSec, 0U, 3600U);
+        uint32_t durationSec = deauth_rules::resolveDurationSec(
+            args["duration"].is<uint32_t>(),
+            args["duration"].as<uint32_t>()
+        );
+        durationSec = deauth_rules::clampDurationSec(durationSec);
         uint8_t reason = args["reason"].as<uint8_t>() ? args["reason"].as<uint8_t>() : 7;
         uint16_t intervalMs = args["deauth_interval_ms"].as<uint16_t>() ?
             args["deauth_interval_ms"].as<uint16_t>() : 100;
@@ -4015,6 +4020,11 @@ void setup() {
     // ★ FIXED: removed the redundant first AP config block.
     // The one and only WiFi.mode() call is right here.
     WiFi.mode(WIFI_MODE_APSTA);
+    // Captive-portal and injection workflows need deterministic AP latency.
+    // Modem sleep can buffer packets for seconds and looks like packet loss to
+    // clients, especially on classic ESP32 targets.
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
     applyStoredWifiCountry();
 
     // Configure a hidden, protected AP so WIFI_IF_AP is always valid for TX
@@ -4103,14 +4113,19 @@ void loop() {
     sendHeartbeat();
     
     sniffer.processQueue();
-    sniffer.handleHop();
     #if NRSUITE_ENABLE_PORTAL
+    const bool portalOwnsRadio = portal.isRunning();
     portal.update();
+    #else
+    const bool portalOwnsRadio = false;
     #endif
-    beacon.update();
-    deauthDetector.update();
-    hiddenApDetector.update();
-    mesh.update();
+    if (!portalOwnsRadio) {
+        sniffer.handleHop();
+        beacon.update();
+        deauthDetector.update();
+        hiddenApDetector.update();
+        mesh.update();
+    }
     pinBruteforce.update();
     #ifdef ENABLE_BLE_HID
         blePinBruteforce.update();

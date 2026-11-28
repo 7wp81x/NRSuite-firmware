@@ -4,8 +4,8 @@
 [![Platform: ESP32](https://img.shields.io/badge/platform-ESP32%20%7C%20C3%20%7C%20C5%20%7C%20S2%20%7C%20S3-E7352C?logo=espressif&logoColor=white)](#supported-boards)
 [![Build: PlatformIO](https://img.shields.io/badge/build-PlatformIO-FF7F00?logo=platformio&logoColor=white)](https://platformio.org/)
 [![Documentation](https://img.shields.io/badge/docs-NRSuite--Docs-3DDC84?logo=readthedocs&logoColor=white)](https://7wp81x.github.io/NRSuite-Docs/)
-[![Status: Stable](https://img.shields.io/badge/status-1.0.0-brightgreen.svg)](../../releases)
-[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
+[![Status: Stable](https://img.shields.io/badge/status-1.0.1-brightgreen.svg)](../../releases)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nyUSyqkeZ)
 
 **ESP32 firmware for the NRSuite security research toolkit.**
 
@@ -13,7 +13,7 @@ This firmware runs on the ESP32 and communicates with the [NRSuite Android app](
 
 > **Authorized use only.** This firmware is for security research and testing on networks and devices you own or are explicitly authorized to test. See [LEGAL.md](./LEGAL.md).
 
-**Current stable release line:** `1.0.0`. Mesh support remains experimental and is outside the v1 non-mesh release scope.
+**Current stable release line:** `1.0.1`. Mesh support remains experimental and is outside the v1 non-mesh release scope.
 
 Full user documentation, supported-board details, and flashing instructions:
 [NRSuite Documentation](https://7wp81x.github.io/NRSuite-Docs/)
@@ -59,7 +59,7 @@ Prefer flashing from your phone? Use the built-in flasher in the [NRSuite Androi
 
 Join the NRSuite Discord server for setup help, build showcases, release news, and development discussion:
 
-[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nnU9QSX5UZ)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/nyUSyqkeZ)
 
 Use `#support` for help, `#showcase` for builds, and `#github` for repo/code discussion.
 
@@ -631,6 +631,7 @@ Short version:
 
 | Firmware version | App version | Protocol spec |
 |---|---|---|
+| v1.0.1 | v1.0.1 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0 | v1.0.0 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.2 | v1.0.0-rc.3 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |
 | v1.0.0-rc.1 | v1.0.0-rc.2 | v1.0 / proto_minor 2 (non-mesh); mesh protocol 1.1 is experimental |

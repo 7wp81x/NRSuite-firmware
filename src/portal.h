@@ -50,6 +50,7 @@ private:
     size_t   _htmlExpected = 0;
     int      _loginAttempts = 0;
     uint8_t  _lastStationCount = 0;
+    uint8_t  _portalChannel = 0;
     uint32_t _lastStationCountPollMs = 0;
     TaskHandle_t _deauthTaskHandle = nullptr;
     static String _servedSnapshot;
